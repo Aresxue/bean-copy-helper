@@ -1,0 +1,140 @@
+<!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
+<idea-plugin>
+  <!-- Unique identifier of the plugin. It should be FQN. It cannot be changed between the plugin versions. -->
+  <id>cn.ares.bean-copy-helper</id>
+
+  <!-- Public plugin name should be written in Title Case.
+       Guidelines: https://plugins.jetbrains.com/docs/marketplace/plugin-overview-page.html#plugin-name -->
+  <name>bean-copy-helper</name>
+
+  <version>1.0.0</version>
+
+  <!-- A displayed Vendor name or Organization ID displayed on the Plugins Page. -->
+  <vendor email="ares320635@gmail.com">Aresxue</vendor>
+
+  <!-- Description of the plugin displayed on the Plugin Page and IDE Plugin Manager.
+       Simple HTML elements (text formatting, paragraphs, and lists) can be added inside of <![CDATA[ ]]> tag.
+       Guidelines: https://plugins.jetbrains.com/docs/marketplace/plugin-overview-page.html#plugin-description -->
+  <description>
+    <![CDATA[
+      <h2>BeanCopy Assistant</h2>
+      Currently supports recognition and conversion of property copying for org.springframework.beans.BeanUtils, org.springframework.cglib.beans.BeanCopier, org.apache.commons.beanutils.BeanUtils, and cn.hutool.core.bean.BeanUtil.
+
+      <h3>1. Identify property copy and convert it to a reference to the corresponding Getter/Setter methods</h3>
+      Usage: Right-click on the Getter/Setter method. If there are corresponding property copies, the <b style="color:rgb(204, 48, 48);">Find Property Copy Usages</b> option will appear. Click this option.
+
+      <h3>2. Static check for property copying: Warn for inconsistent types of identical property names, copying with no matching properties, and incorrect usage</h3>
+      Usage: Simply open the file to automatically scan. When the cursor is placed on the property copy method, warning information will be displayed.
+
+      <h3>3. Preview and generate comments comparing source and target class properties</h3>
+      Usage: Place the cursor on the property copy method, invoke the intention action (⌥ + Enter for Mac; Alt + Enter for Win/Linux), select "BeanCopyHelper - Show properties compare" to preview. Press Enter to generate the preview comment.
+
+      <h3>4. Generate corresponding Getter/Setter code for property copying</h3>
+      Usage: Place the cursor on the property copy method, invoke the intention action (⌥ + Enter for Mac; Alt + Enter for Win/Linux), select "BeanCopyHelper - Generate method" to preview. Press Enter to generate the preview code.
+
+      <h3>5. Preview and generate comments for successfully copied properties between the source and target classes</h3>
+      Usage: Place the cursor on the property copy method, invoke the intention action (⌥ + Enter for Mac; Alt + Enter for Win/Linux), select "BeanCopyHelper - Show copy properties" to preview. Press Enter to generate the preview comment.
+
+      <h3>6. Configure font size</h3>
+      To adapt to different platforms and various versions of IDEA, the plugin provides a font size configuration option, with the default set to 100% (percentage). If you need to adjust the font size, just modify the percentage.<br/>
+      Configuration path: <code>Settings -> Other Settings -> Bean Copy Helper Plugin</code>
+
+
+      <h2>BeanCopy助手</h2>
+      当前已支持org.springframework.beans.BeanUtils、org.springframework.cglib.beans.BeanCopier、org.apache.commons.beanutils.BeanUtils、cn.hutool.core.bean.BeanUtil等属性复制的识别和转换
+
+      <h3>1.识别属性复制将其转为对应的Getter/Setter方法的引用</h3>
+      使用方式：右击Getter方法/Setter方法/Field(Lombok)后如果存在对应的属性复制会有
+      <b style="color:rgb(204, 48, 48);">Find Property Copy Usages</b>
+      选项，点击该选项
+
+      <h3>2.属性复制静态检查，对属性名相同类型不一致的复制、没有相同属性的复制和错误用法做告警</h3>
+      使用方式：打开文件即可自动扫描，将光标放置在属性复制方法上时即可显示告警信息
+
+      <h3>3.可以预览源类和目标类属性的对比并生成相应注释</h3>
+      使用方式：将光标放置在属性复制方法上，唤起意图动作 ( ⌥ + Enter for Mac; Alt + Enter for Win/Linux )，选择 "BeanCopyHelper - Show properties compare"即可预览，回车生成预览注释
+
+      <h3>4.生成属性复制对应的Getter/Setter代码</h3>
+      使用方式：将光标放置在属性复制方法上，唤起意图动作 ( ⌥ + Enter for Mac; Alt + Enter for Win/Linux )，选择 "BeanCopyHelper - Generate method"即可预览，回车生成预览代码
+
+      <h3>5.可以预览源类和目标类复制成功的属性并生成相应注释</h3>
+      使用方式：将光标放置在属性复制方法上，唤起意图动作 ( ⌥ + Enter for Mac; Alt + Enter for Win/Linux )，选择 "BeanCopyHelper - Show copy properties"即可预览，回车生成预览注释
+
+      <h3>6.配置字体大小</h3>
+      为了适配不同平台不同版本的IDEA，插件提供了配置项字体大小，该选项为百分比默认为100%，如果需要调整字体大小修改百分比即可。<br/>
+      配置路径: <code>Settings -> Other Settings -> Bean Copy Helper Plugin</code>
+    ]]>
+  </description>
+
+  <change-notes>
+    <![CDATA[
+        <p>1.0.0</p>
+        <ul>
+           <li> Release: 1.0.0 </li>
+        </ul>
+    ]]>
+  </change-notes>
+
+
+  <!-- Product and plugin compatibility requirements. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-compatibility.html -->
+  <depends>com.intellij.modules.platform</depends>
+  <depends>com.intellij.modules.lang</depends>
+  <depends>com.intellij.modules.java</depends>
+
+  <actions>
+    <action
+      id="FindPropertyCopyUsages"
+      class="cn.ares.bean.copy.helper.BeanCopyHelper"
+      text="Find Property Copy Usages"
+      icon="AllIcons.Actions.Find">
+      <add-to-group group-id="EditorPopupMenu" anchor="first"/>
+    </action>
+  </actions>
+
+  <!-- Extension points defined by the plugin.
+       Read more: https://plugins.jetbrains.com/docs/intellij/plugin-extension-points.html -->
+  <extensions defaultExtensionNs="com.intellij">
+    <intentionAction>
+      <language>JAVA</language>
+      <className>cn.ares.bean.copy.helper.action.ShowPropertiesCompareAction</className>
+      <category>BeanCopyHelper</category>
+    </intentionAction>
+
+    <intentionAction>
+      <language>JAVA</language>
+      <className>cn.ares.bean.copy.helper.action.ShowCopyPropertiesAction</className>
+      <category>BeanCopyHelper</category>
+    </intentionAction>
+
+    <intentionAction>
+      <language>JAVA</language>
+      <className>cn.ares.bean.copy.helper.action.GenerateMethodAction</className>
+      <category>BeanCopyHelper</category>
+    </intentionAction>
+
+    <localInspection
+      language="JAVA"
+      bundle="i18n.message"
+      key="bean.copy.helper.inspection.display.name"
+      groupPath="Java"
+      groupBundle="i18n.message"
+      groupKey="bean.copy.helper.inspection.display.name"
+      enabledByDefault="true"
+      level="WARNING"
+      implementationClass="cn.ares.bean.copy.helper.inspection.BeanCopyInspection"/>
+
+    <postStartupActivity implementation="cn.ares.bean.copy.helper.BeanCopyHelper"/>
+
+    <applicationListener implementation="cn.ares.bean.copy.helper.BeanCopyHelperApplicationListener"/>
+
+    <applicationService serviceImplementation="cn.ares.bean.copy.helper.settings.BeanCopyHelperPluginSettings"
+      configurationSchemaKey="cn.ares.bean.copy.helper.settings.BeanCopyHelperPluginSettings"/>
+    <applicationConfigurable instance="cn.ares.bean.copy.helper.settings.BeanCopyHelperPluginConfigurable"
+      displayName="Bean Copy Helper Plugin"/>
+
+    <errorHandler implementation="cn.ares.bean.copy.helper.GlobalErrorHandler"/>
+  </extensions>
+
+  <resource-bundle/>
+
+</idea-plugin>

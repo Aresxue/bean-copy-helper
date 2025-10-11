@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 24">
+  <!-- 左正方体 -->
+  <rect x="2" y="4" width="14" height="14" rx="3" fill="#AED581" stroke="#558B2F" stroke-width="2"/>
+  <!-- 右正方体 -->
+  <rect x="32" y="4" width="14" height="14" rx="3" fill="#FFF9C4" stroke="#FDD835" stroke-width="2"/>
+  <!-- 较细的箭头 -->
+  <line x1="16" y1="11" x2="32" y2="11" stroke="#1976D2" stroke-width="2" marker-end="url(#arrowheadSm)"/>
+  <defs>
+    <marker id="arrowheadSm" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0,0 5,2.5 0,5" fill="#1976D2"/>
+    </marker>
+  </defs>
+</svg>
