@@ -8,7 +8,7 @@
 
 ### 2.属性复制静态检查，对属性名相同类型不一致的复制、没有相同属性的复制和错误用法做告警
 使用方式：打开文件即可自动扫描，将光标放置在属性复制方法上时即可显示告警信息
-![bean_copy_inspection1.png](doc/img/bean_copy_inspection1.png)****
+![bean_copy_inspection1.png](doc/img/bean_copy_inspection1.png)
 ![bean_copy_inspection2.png](doc/img/bean_copy_inspection2.png)
 ![bean_copy_inspection3.png](doc/img/bean_copy_inspection3.png)
 
