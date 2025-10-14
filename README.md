@@ -11,6 +11,7 @@
 ![bean_copy_inspection1.png](doc/img/bean_copy_inspection1.png)
 ![bean_copy_inspection2.png](doc/img/bean_copy_inspection2.png)
 ![bean_copy_inspection3.png](doc/img/bean_copy_inspection3.png)
+![bean_copy_inspection4.png](doc/img/bean_copy_inspection4.png)
 
 ### 3.可以预览源类和目标类属性的对比并生成相应注释
 使用方式：将光标放置在属性复制方法上，唤起意图动作 ( ⌥ + Enter for Mac; Alt + Enter for Win/Linux )，选择 "BeanCopyHelper - Show properties compare"即可预览，回车生成预览注释
@@ -57,8 +58,8 @@ Automatically scans for issues such as copying between same-named but mismatched
 Open the source file for automatic scanning. When the cursor is on a property copy method, warnings will be shown if issues are detected.
 ![bean_copy_inspection1.png](doc/img/bean_copy_inspection1.png)  
 ![bean_copy_inspection2.png](doc/img/bean_copy_inspection2.png)  
-![bean_copy_inspection3.png](doc/img/bean_copy_inspection3.png)
-
+![bean_copy_inspection3****.png](doc/img/bean_copy_inspection3.png)
+![bean_copy_inspection4.png](doc/img/bean_copy_inspection4.png)
 ---
 
 ### 3. Preview and Annotate Source and Target Class Property Comparison
