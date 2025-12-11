@@ -7,7 +7,7 @@
        Guidelines: https://plugins.jetbrains.com/docs/marketplace/plugin-overview-page.html#plugin-name -->
   <name>bean-copy-helper</name>
 
-  <version>1.0.0</version>
+  <version>1.0.1</version>
 
   <!-- A displayed Vendor name or Organization ID displayed on the Plugins Page. -->
   <vendor email="ares320635@gmail.com">Aresxue</vendor>
@@ -68,9 +68,9 @@
 
   <change-notes>
     <![CDATA[
-        <p>1.0.0</p>
+        <p>1.0.1</p>
         <ul>
-           <li> Release: 1.0.0 </li>
+           <li> Release: 1.0.1 </li>
         </ul>
     ]]>
   </change-notes>
