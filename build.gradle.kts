@@ -43,6 +43,8 @@ dependencies {
         plugins(providers.gradleProperty("platformPlugins").map { it.split(',') })
 
         testFramework(TestFrameworkType.Platform)
+        // LightJavaCodeInsightFixtureTestCase在java-test-framework中，Platform不包含它
+        testFramework(TestFrameworkType.Plugin.Java)
     }
 }
 

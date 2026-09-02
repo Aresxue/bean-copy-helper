@@ -77,8 +77,8 @@ do
     ls=$( ls -ld "$app_path" )
     link=${ls#*' -> '}
     case $link in             #(
-      /*)   app_path=$link ; #(
-      *)    app_path=$APP_HOME$link ;
+      /*)   app_path=$link ;; #(
+      *)    app_path=$APP_HOME$link ;;
     esac
 done
 
@@ -108,10 +108,10 @@ msys=false
 darwin=false
 nonstop=false
 case "$( uname )" in                #(
-  CYGWIN* )         cygwin=true  ; #(
-  Darwin* )         darwin=true  ; #(
-  MSYS* | MINGW* )  msys=true    ; #(
-  NONSTOP* )        nonstop=true ;
+  CYGWIN* )         cygwin=true  ;; #(
+  Darwin* )         darwin=true  ;; #(
+  MSYS* | MINGW* )  msys=true    ;; #(
+  NONSTOP* )        nonstop=true ;;
 esac
 
 CLASSPATH=$APP_HOME/gradle/wrapper/gradle-wrapper.jar
@@ -152,7 +152,7 @@ if ! "$cygwin" && ! "$darwin" && ! "$nonstop" ; then
             warn "Could not query maximum file descriptor limit"
     esac
     case $MAX_FD in  #(
-      '' | soft) :; #(
+      '' | soft) :;; #(
       *)
         # In POSIX sh, ulimit -n is undefined. That's why the result is checked to see if it worked.
         # shellcheck disable=SC2039,SC3045
@@ -180,10 +180,10 @@ if "$cygwin" || "$msys" ; then
     for arg do
         if
             case $arg in                                #(
-              -*)   false ;                            # don't mess with options #(
+              -*)   false ;;                            # don't mess with options #(
               /?*)  t=${arg#/} t=/${t%%/*}              # looks like a POSIX filepath
-                    [ -e "$t" ] ;                      #(
-              *)    false ;
+                    [ -e "$t" ] ;;                      #(
+              *)    false ;;
             esac
         then
             arg=$( cygpath --path --ignore --mixed "$arg" )
