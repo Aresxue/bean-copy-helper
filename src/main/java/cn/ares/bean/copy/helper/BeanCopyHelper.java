@@ -21,6 +21,7 @@ import cn.ares.bean.copy.helper.resolve.impl.HutoolBeanCopyResolveImpl;
 import cn.ares.bean.copy.helper.resolve.impl.SpringBeanCopierResolveImpl;
 import cn.ares.bean.copy.helper.resolve.impl.SpringBeanCopyResolveImpl;
 import cn.ares.bean.copy.helper.settings.BeanCopyHelperPluginSettings;
+import cn.ares.bean.copy.helper.util.CommonUtil;
 import cn.ares.bean.copy.helper.util.LocaleSupport;
 import com.intellij.codeInsight.intention.preview.IntentionPreviewInfo.Html;
 import com.intellij.find.FindManager;
@@ -58,6 +59,7 @@ import com.intellij.openapi.vfs.newvfs.events.VFilePropertyChangeEvent;
 import com.intellij.pom.Navigatable;
 import com.intellij.psi.JavaRecursiveElementVisitor;
 import com.intellij.psi.PsiAnnotation;
+import com.intellij.psi.PsiArrayInitializerExpression;
 import com.intellij.psi.PsiClass;
 import com.intellij.psi.PsiElement;
 import com.intellij.psi.PsiExpression;
@@ -71,10 +73,14 @@ import com.intellij.psi.PsiMethod;
 import com.intellij.psi.PsiMethodCallExpression;
 import com.intellij.psi.PsiModifier;
 import com.intellij.psi.PsiModifierList;
+import com.intellij.psi.PsiNewExpression;
 import com.intellij.psi.PsiReferenceExpression;
+import com.intellij.psi.PsiType;
 import com.intellij.psi.PsiTypes;
+import com.intellij.psi.PsiVariable;
 import com.intellij.psi.search.FileTypeIndex;
 import com.intellij.psi.search.GlobalSearchScope;
+import com.intellij.psi.util.InheritanceUtil;
 import com.intellij.psi.util.PsiTreeUtil;
 import com.intellij.usageView.UsageInfo;
 import com.intellij.usages.Usage;
@@ -98,7 +104,11 @@ import static cn.ares.bean.copy.helper.constant.Mark.DIFF;
 import static cn.ares.bean.copy.helper.constant.Mark.IGNORED;
 import static cn.ares.bean.copy.helper.constant.Mark.SAME;
 import static cn.ares.bean.copy.helper.constant.Mark.TYPE_NOT_MATCH;
+import static cn.ares.bean.copy.helper.resolve.impl.HutoolBeanCopyResolveImpl.HUTOOL_BEAN_UTIL_CLASS_NAME;
+import static cn.ares.bean.copy.helper.resolve.impl.HutoolBeanCopyResolveImpl.HUTOOL_EXTRA_METHOD_NAME_LIST;
 import static cn.ares.bean.copy.helper.resolve.impl.SpringBeanCopierResolveImpl.SPRING_BEAN_COPIER_CLASS_NAME;
+import static com.intellij.psi.CommonClassNames.JAVA_LANG_BOOLEAN;
+import static com.intellij.psi.CommonClassNames.JAVA_LANG_OBJECT;
 
 
 /**
@@ -127,12 +137,19 @@ public class BeanCopyHelper extends AnAction implements StartupActivity.DumbAwar
   private static final Set<String> BEAN_COPY_METHOD_SET = new HashSet<>();
   private static final Set<String> DEFAULT_IGNORE_PROPERTIES = new HashSet<>();
 
+  private static final int IGNORE_PROPERTY_RESOLVE_MAX_DEPTH = 5;
+
   static {
     BEAN_COPY_METHOD_SET.add("copyProperties");
     BEAN_COPY_METHOD_SET.add("BeanUtil.copyProperties");
     BEAN_COPY_METHOD_SET.add("BeanUtils.copyProperties");
     for (BeanCopyResolve beanCopyResolve : RESOLVE_STRATEGIE_LIST) {
       BEAN_COPY_METHOD_SET.add(beanCopyResolve.qualifiedName() + ".copyProperties");
+    }
+    // 只注册带类名的形式，toBean是常见的自定义方法名，注册裸方法名会让任意项目的toBean调用都弹出意图
+    for (String methodName : HUTOOL_EXTRA_METHOD_NAME_LIST) {
+      BEAN_COPY_METHOD_SET.add("BeanUtil." + methodName);
+      BEAN_COPY_METHOD_SET.add(HUTOOL_BEAN_UTIL_CLASS_NAME + "." + methodName);
     }
     BEAN_COPY_METHOD_SET.add("BeanCopier.create");
     BEAN_COPY_METHOD_SET.add(SPRING_BEAN_COPIER_CLASS_NAME + ".create");
@@ -234,25 +251,63 @@ public class BeanCopyHelper extends AnAction implements StartupActivity.DumbAwar
   }
 
   public static Set<String> findCommonPropertyNameSet(Set<String> sourceClassFieldSet, Set<String> targetClassFieldSet, Set<String> ignoreProperties) {
-    sourceClassFieldSet.retainAll(targetClassFieldSet);
+    // 不能就地改写入参，调用方拿的是Result里的属性Map的keySet，剪掉后后续的类型告警会丢失
+    Set<String> commonPropertyNameSet = new TreeSet<>(sourceClassFieldSet);
+    commonPropertyNameSet.retainAll(targetClassFieldSet);
     // 移除忽略字段
-    if (!ignoreProperties.isEmpty()) {
-      ignoreProperties.forEach(sourceClassFieldSet::remove);
-    }
-    DEFAULT_IGNORE_PROPERTIES.forEach(sourceClassFieldSet::remove);
+    ignoreProperties.forEach(commonPropertyNameSet::remove);
+    DEFAULT_IGNORE_PROPERTIES.forEach(commonPropertyNameSet::remove);
 
-    return sourceClassFieldSet.stream().sorted().collect(Collectors.toCollection(TreeSet::new));
+    return commonPropertyNameSet;
   }
 
 
   public static Set<String> getIgnoreProperties(PsiExpression[] expressions) {
-    if (expressions.length > 2) {
-      return Stream.of(expressions)
-          .filter(expression -> expression instanceof PsiLiteralExpression)
-          .map(literalExpression -> literalExpression.getText().replace("\"", ""))
-          .collect(Collectors.toSet());
+    if (expressions.length <= 2) {
+      return Set.of();
     }
-    return Set.of();
+    Set<String> ignoreProperties = new HashSet<>();
+    // 前两个参数是源和目标，忽略属性从第三个参数开始
+    for (int i = 2; i < expressions.length; i++) {
+      collectIgnoreProperty(expressions[i], ignoreProperties, 0);
+    }
+    return ignoreProperties;
+  }
+
+  /**
+   * 忽略属性常量化是常见写法，解析出常量的实际值，否则被忽略的属性会被误判为已复制
+   * depth用于防止常量之间循环引用导致无限递归
+   */
+  private static void collectIgnoreProperty(PsiExpression expression, Set<String> ignoreProperties, int depth) {
+    if (null == expression || depth > IGNORE_PROPERTY_RESOLVE_MAX_DEPTH) {
+      return;
+    }
+    if (expression instanceof PsiLiteralExpression literalExpression) {
+      // 只取字符串字面量，Hutool的ignoreCase等布尔参数也在这个位置
+      if (literalExpression.getValue() instanceof String propertyName) {
+        ignoreProperties.add(propertyName);
+      }
+      return;
+    }
+    if (expression instanceof PsiReferenceExpression referenceExpression) {
+      if (referenceExpression.resolve() instanceof PsiVariable variable) {
+        collectIgnoreProperty(variable.getInitializer(), ignoreProperties, depth + 1);
+      }
+      return;
+    }
+    PsiArrayInitializerExpression arrayInitializer;
+    if (expression instanceof PsiArrayInitializerExpression initializerExpression) {
+      arrayInitializer = initializerExpression;
+    } else if (expression instanceof PsiNewExpression newExpression) {
+      arrayInitializer = newExpression.getArrayInitializer();
+    } else {
+      return;
+    }
+    if (null != arrayInitializer) {
+      for (PsiExpression element : arrayInitializer.getInitializers()) {
+        collectIgnoreProperty(element, ignoreProperties, depth + 1);
+      }
+    }
   }
 
   @Override
@@ -281,7 +336,7 @@ public class BeanCopyHelper extends AnAction implements StartupActivity.DumbAwar
     startFileChangeListener(project);
   }
 
-  private void copyPropertiesReferenceScan(VirtualFile virtualFile, PsiManager manager) {
+  void copyPropertiesReferenceScan(VirtualFile virtualFile, PsiManager manager) {
     try {
       if (null == virtualFile || !virtualFile.isValid()) {
         return;
@@ -289,6 +344,8 @@ public class BeanCopyHelper extends AnAction implements StartupActivity.DumbAwar
       PsiFile file = manager.findFile(virtualFile);
       if (file instanceof PsiJavaFile javaFile) {
         LOGGER.info("start scan file: " + virtualFile.getPath());
+        // 重扫前先清除该文件的旧索引，否则索引只增不减，被删除的调用点会一直残留
+        CopyPropertiesReferenceIndex.removeByFile(virtualFile.getUrl());
         // 扫描单个文件
         try {
           javaFile.accept(new JavaRecursiveElementVisitor() {
@@ -311,48 +368,9 @@ public class BeanCopyHelper extends AnAction implements StartupActivity.DumbAwar
                     return;
                   }
 
-                  Map<String, Property> targetPropertyMap = result.targetPropertyMap();
-                  Set<String> sameProperties = targetPropertyMap.values().stream()
-                      .filter(property -> SAME == property.getMark())
-                      .map(Property::getName)
-                      .collect(Collectors.toSet());
-                  if (!sameProperties.isEmpty()) {
-                    Set<String> setterMethodSet = new HashSet<>();
-                    Set<String> getterMethodSet = new HashSet<>();
-                    sameProperties.forEach(propertyName -> {
-                      String suffix = Character.toUpperCase(propertyName.charAt(0)) + propertyName.substring(1);
-                      setterMethodSet.add("set" + suffix);
-                      getterMethodSet.add("get" + suffix);
-                    });
-                    for (PsiMethod method : targetClass.getMethods()) {
-                      if (setterMethodSet.contains(method.getName()) && validSetterMethod(method)) {
-                        CopyPropertiesReferenceIndex.addReference(method, methodCallExpression);
-                      }
-                    }
-                    for (PsiMethod method : sourceClass.getMethods()) {
-                      if (getterMethodSet.contains(method.getName()) && validGetterMethod(method)) {
-                        CopyPropertiesReferenceIndex.addReference(method, methodCallExpression);
-                      }
-                    }
-
-                    // 添加使用了lombok的类的字段的引用
-                    if (hasSetterLombokAnnotation(targetClass)) {
-                      sameProperties.forEach(propertyName -> {
-                        PsiField field = targetClass.findFieldByName(propertyName, true);
-                        if (null != field) {
-                          CopyPropertiesReferenceIndex.addReference(field, methodCallExpression);
-                        }
-                      });
-                    }
-                    if (hasGetterLombokAnnotation(sourceClass)) {
-                      sameProperties.forEach(propertyName -> {
-                        PsiField field = sourceClass.findFieldByName(propertyName, true);
-                        if (null != field) {
-                          CopyPropertiesReferenceIndex.addReference(field, methodCallExpression);
-                        }
-                      });
-                    }
-                  }
+                  // 目标类的Setter和源类的Getter都是该属性复制的引用方
+                  addAccessorReference(targetClass, result.targetPropertyMap(), true, methodCallExpression);
+                  addAccessorReference(sourceClass, result.sourcePropertyMap(), false, methodCallExpression);
                 }
               } catch (Throwable throwable) {
                 LOGGER.warn("scan file: " + virtualFile.getPath() + " fail:", throwable);
@@ -374,7 +392,145 @@ public class BeanCopyHelper extends AnAction implements StartupActivity.DumbAwar
     }
   }
 
-  private boolean hasGetterLombokAnnotation(PsiClass sourceClass) {
+  /**
+   * 建立单侧访问器到属性复制调用点的索引
+   * setter为true时owner是目标类匹配Setter，为false时owner是源类匹配Getter
+   */
+  private static void addAccessorReference(PsiClass ownerClass, Map<String, Property> propertyMap, boolean setter, PsiMethodCallExpression methodCallExpression) {
+    Set<String> samePropertyNameSet = propertyMap.values().stream()
+        .filter(property -> SAME == property.getMark())
+        .map(Property::getName)
+        .collect(Collectors.toSet());
+    if (samePropertyNameSet.isEmpty()) {
+      return;
+    }
+
+    // 预筛只为避免逐方法遍历全部属性，matchesAccessor仍是最终判据
+    Set<String> accessorNameSet = propertyMap.values().stream()
+        .filter(property -> SAME == property.getMark())
+        .flatMap(property -> accessorNameSet(property.getName(), property.getType(), setter).stream())
+        .collect(Collectors.toSet());
+
+    // getAllMethods包含父类声明的方法，父类声明子类未覆写的访问器同样是该属性复制的引用方
+    for (PsiMethod method : ownerClass.getAllMethods()) {
+      if (accessorNameSet.contains(method.getName()) && matchesAccessor(method, ownerClass, propertyMap, setter)) {
+        CopyPropertiesReferenceIndex.addReference(method, methodCallExpression);
+      }
+    }
+
+    // 添加使用了lombok的类的字段的引用
+    boolean lombokAnnotated = setter ? hasSetterLombokAnnotation(ownerClass) : hasGetterLombokAnnotation(ownerClass);
+    if (lombokAnnotated) {
+      samePropertyNameSet.forEach(propertyName -> {
+        PsiField field = ownerClass.findFieldByName(propertyName, true);
+        if (null != field) {
+          CopyPropertiesReferenceIndex.addReference(field, methodCallExpression);
+        }
+      });
+    }
+  }
+
+  /**
+   * @author: Aresxue
+   * @description: 判断成员是否确实参与了该属性复制，建索引与查询共用同一判据避免两套判据分叉
+   * @time: 2026-09-02 10:00:00
+   * @params: [member, methodCallExpression] 目标成员，属性复制调用点
+   * @return: boolean 该成员对应的属性确实会被复制时返回true
+   */
+  public static boolean matchesPropertyCopy(PsiMember member, PsiMethodCallExpression methodCallExpression) {
+    if (null == member || null == methodCallExpression || !methodCallExpression.isValid() || !member.isValid()) {
+      return false;
+    }
+    try {
+      if (!isBeanCopyMethod(methodCallExpression.getMethodExpression().getCanonicalText())) {
+        return false;
+      }
+      Result result = invoke(methodCallExpression);
+      if (null == result) {
+        return false;
+      }
+      PsiClass sourceClass = result.sourceClass();
+      PsiClass targetClass = result.targetClass();
+      if (null == sourceClass || null == targetClass) {
+        return false;
+      }
+      // 源类和目标类可能是同一个类，两侧都要判断命中任一即可
+      return matchesAccessor(member, targetClass, result.targetPropertyMap(), true)
+          || matchesAccessor(member, sourceClass, result.sourcePropertyMap(), false);
+    } catch (ProcessCanceledException | IndexNotReadyException exception) {
+      throw exception;
+    } catch (Exception exception) {
+      LOGGER.warn("match property copy fail:", exception);
+      return false;
+    }
+  }
+
+  private static boolean matchesAccessor(PsiMember member, PsiClass ownerClass, Map<String, Property> propertyMap, boolean setter) {
+    // 成员必须声明在该类自身或其父类型上，挡住指针漂移到无关类的同名成员
+    PsiClass containingClass = member.getContainingClass();
+    if (null == containingClass || JAVA_LANG_OBJECT.equals(containingClass.getQualifiedName())) {
+      return false;
+    }
+    if (!InheritanceUtil.isInheritorOrSelf(ownerClass, containingClass, true)) {
+      return false;
+    }
+
+    if (member instanceof PsiField field) {
+      // 非lombok类的字段本身不是复制的引用方，其Getter/Setter才是
+      boolean lombokAnnotated = setter ? hasSetterLombokAnnotation(ownerClass) : hasGetterLombokAnnotation(ownerClass);
+      if (!lombokAnnotated) {
+        return false;
+      }
+      Property property = propertyMap.get(field.getName());
+      return null != property && SAME == property.getMark();
+    }
+
+    if (member instanceof PsiMethod method) {
+      boolean validAccessor = setter ? validSetterMethod(method) : validGetterMethod(method);
+      if (!validAccessor) {
+        return false;
+      }
+      // 由属性名正向拼出期望的方法名，避免方法名反推属性名在getURL这类命名上失配
+      String methodName = method.getName();
+      return propertyMap.values().stream()
+          .filter(property -> SAME == property.getMark())
+          .anyMatch(property -> accessorNameSet(property.getName(), property.getType(), setter).contains(methodName)
+              && accessorTypeMatch(method, property.getType(), setter));
+    }
+
+    return false;
+  }
+
+  /**
+   * 属性对应的访问器方法名，boolean属性的Getter可能是is前缀如lombok为boolean active生成的isActive
+   */
+  private static Set<String> accessorNameSet(String propertyName, PsiType propertyType, boolean setter) {
+    String suffix = CommonUtil.upperFirst(propertyName);
+    if (setter) {
+      return Set.of("set" + suffix);
+    }
+    if (isBooleanType(propertyType)) {
+      return Set.of("get" + suffix, "is" + suffix);
+    }
+    return Set.of("get" + suffix);
+  }
+
+  private static boolean isBooleanType(PsiType propertyType) {
+    String canonicalText = propertyType.getCanonicalText();
+    return "boolean".equals(canonicalText) || JAVA_LANG_BOOLEAN.equals(canonicalText);
+  }
+
+  private static boolean accessorTypeMatch(PsiMethod method, PsiType propertyType, boolean setter) {
+    if (setter) {
+      PsiType parameterType = method.getParameterList().getParameters()[0].getType();
+      // 允许手写的宽化Setter如setAge(Object)，但拒绝类型不兼容的重载如Integer属性配setAge(String)
+      return parameterType.isAssignableFrom(propertyType);
+    }
+    PsiType returnType = method.getReturnType();
+    return null != returnType && propertyType.isAssignableFrom(returnType);
+  }
+
+  private static boolean hasGetterLombokAnnotation(PsiClass sourceClass) {
     PsiModifierList modifierList = sourceClass.getModifierList();
     if (modifierList != null) {
       for (PsiAnnotation annotation : modifierList.getAnnotations()) {
@@ -387,7 +543,7 @@ public class BeanCopyHelper extends AnAction implements StartupActivity.DumbAwar
     return false;
   }
 
-  private boolean hasSetterLombokAnnotation(PsiClass targetClass) {
+  private static boolean hasSetterLombokAnnotation(PsiClass targetClass) {
     PsiModifierList modifierList = targetClass.getModifierList();
     if (modifierList != null) {
       for (PsiAnnotation annotation : modifierList.getAnnotations()) {
@@ -401,14 +557,14 @@ public class BeanCopyHelper extends AnAction implements StartupActivity.DumbAwar
   }
 
 
-  private boolean validSetterMethod(PsiMethod method) {
+  private static boolean validSetterMethod(PsiMethod method) {
     // 非static返回为void入参个数为1的方法
     return method.getParameterList().getParametersCount() == 1
         && PsiTypes.voidType() == method.getReturnType()
         && !method.hasModifierProperty(PsiModifier.STATIC);
   }
 
-  private boolean validGetterMethod(PsiMethod method) {
+  private static boolean validGetterMethod(PsiMethod method) {
     // 非static返回不为void入参个数为0的方法
     return method.getParameterList().getParametersCount() == 0
         && PsiTypes.voidType() != method.getReturnType()
@@ -454,8 +610,28 @@ public class BeanCopyHelper extends AnAction implements StartupActivity.DumbAwar
       VirtualFile virtualFile = fileContentChangeEvent.getFile();
       copyPropertiesReferenceScan(virtualFile, manager);
     } else if (event instanceof VFileDeleteEvent fileDeleteEvent) {
+      // 文件已删除无法再判断是否目录，按文件和目录各清一次，未命中时是空操作
+      String fileUrl = fileDeleteEvent.getFile().getUrl();
+      CopyPropertiesReferenceIndex.removeByFile(fileUrl);
+      CopyPropertiesReferenceIndex.removeByDirectory(fileUrl);
     } else if (event instanceof VFileMoveEvent fileMoveEvent) {
+      // 移动后url变化，清掉旧url的映射再按新位置重扫
+      VirtualFile virtualFile = fileMoveEvent.getFile();
+      String oldUrl = fileMoveEvent.getOldParent().getUrl() + "/" + virtualFile.getName();
+      CopyPropertiesReferenceIndex.removeByFile(oldUrl);
+      // 移动的是目录时其下所有文件的旧url都要清除
+      CopyPropertiesReferenceIndex.removeByDirectory(oldUrl);
+      copyPropertiesReferenceScan(virtualFile, manager);
     } else if (event instanceof VFilePropertyChangeEvent filePropertyChangeEvent) {
+      // 只有重命名会改变url，其余属性变更与索引无关
+      if (VirtualFile.PROP_NAME.equals(filePropertyChangeEvent.getPropertyName())) {
+        VirtualFile virtualFile = filePropertyChangeEvent.getFile();
+        VirtualFile parent = virtualFile.getParent();
+        if (null != parent) {
+          CopyPropertiesReferenceIndex.removeByFile(parent.getUrl() + "/" + filePropertyChangeEvent.getOldValue());
+        }
+        copyPropertiesReferenceScan(virtualFile, manager);
+      }
     }
   }
 
@@ -470,8 +646,9 @@ public class BeanCopyHelper extends AnAction implements StartupActivity.DumbAwar
     PsiElement element = anActionEvent.getData(CommonDataKeys.PSI_ELEMENT);
     boolean visible = false;
     if (element instanceof PsiMethod method) {
-      if ((method.getName().startsWith("set") && validSetterMethod(method))
-          || (method.getName().startsWith("get") && validGetterMethod(method))) {
+      String methodName = method.getName();
+      if ((methodName.startsWith("set") && validSetterMethod(method))
+          || ((methodName.startsWith("get") || methodName.startsWith("is")) && validGetterMethod(method))) {
         visible = isVisible(method);
       }
     } else if (element instanceof PsiField field) {
@@ -481,8 +658,8 @@ public class BeanCopyHelper extends AnAction implements StartupActivity.DumbAwar
   }
 
   private boolean isVisible(PsiMember member) {
-    List<PsiMethodCallExpression> referenceList = CopyPropertiesReferenceIndex.getReferenceList(member);
-    return !referenceList.isEmpty();
+    // 语义复核要跑完整的解析，右键菜单每次都会触发，命中首个即返回避免放大延迟
+    return CopyPropertiesReferenceIndex.hasReference(member);
   }
 
   @Override
@@ -546,7 +723,8 @@ public class BeanCopyHelper extends AnAction implements StartupActivity.DumbAwar
                        Map<String, Property> targetPropertyMap,
                        Map<String, Property> lowerCaseSourcePropertyMap,
                        Map<String, Property> lowerCaseTargetPropertyMap,
-                       Set<String> ignoredProperties) {
+                       Set<String> ignoredProperties,
+                       boolean sourceCollection) {
 
   }
 

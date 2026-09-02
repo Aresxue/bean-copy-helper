@@ -16,15 +16,19 @@ import cn.ares.bean.copy.helper.BeanCopyHelper.Result;
 import cn.ares.bean.copy.helper.model.Property;
 import cn.ares.bean.copy.helper.util.CommonUtil;
 import com.intellij.psi.PsiClass;
+import com.intellij.psi.PsiField;
 import com.intellij.psi.PsiMethodCallExpression;
+import com.intellij.psi.PsiSubstitutor;
 import com.intellij.psi.PsiType;
 import com.intellij.psi.impl.source.PsiImmediateClassType;
+import com.intellij.psi.util.TypeConversionUtil;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Stream;
 
 import static com.intellij.psi.CommonClassNames.JAVA_LANG_CLASS;
 
@@ -56,11 +60,16 @@ public interface BeanCopyResolve {
   }
 
   default Result buildResult(PsiClass sourceClass, PsiClass targetClass, Set<String> ignoreProperties, boolean ignoreCase) {
+    return buildResult(sourceClass, targetClass, ignoreProperties, ignoreCase, false);
+  }
+
+  /**
+   * sourceCollection标识源是集合，用于生成方法时按批量转换渲染
+   */
+  default Result buildResult(PsiClass sourceClass, PsiClass targetClass, Set<String> ignoreProperties, boolean ignoreCase, boolean sourceCollection) {
     // 先收集一遍
-    List<Property> sourceProperties = Stream.of(sourceClass.getAllFields())
-        .map(field -> new Property(field.getName(), field.getType())).toList();
-    List<Property> targetProperties = Stream.of(targetClass.getAllFields())
-        .map(field -> new Property(field.getName(), field.getType())).toList();
+    List<Property> sourceProperties = collectProperties(sourceClass);
+    List<Property> targetProperties = collectProperties(targetClass);
 
     Map<String, Property> sourcePropertyMap = CommonUtil.toIdentityMap(sourceProperties, Property::getName);
     Map<String, Property> targetPropertyMap = CommonUtil.toIdentityMap(targetProperties, Property::getName);
@@ -72,7 +81,40 @@ public interface BeanCopyResolve {
     sourceProperties.forEach(property -> BeanCopyHelper.markProperties(ignoreProperties, targetPropertyMap, lowerCaseTargetPropertyMap, property));
     targetProperties.forEach(property -> BeanCopyHelper.markProperties(ignoreProperties, sourcePropertyMap, lowerCaseSourcePropertyMap, property));
 
-    return new Result(sourceClass, targetClass, sourcePropertyMap, targetPropertyMap, lowerCaseSourcePropertyMap, lowerCaseTargetPropertyMap, ignoreProperties);
+    return new Result(sourceClass, targetClass, sourcePropertyMap, targetPropertyMap, lowerCaseSourcePropertyMap, lowerCaseTargetPropertyMap, ignoreProperties, sourceCollection);
+  }
+
+  /**
+   * 收集类及其父类的属性，同名字段按Java的遮蔽规则只取最派生的那个，
+   * 继承自泛型父类的字段用父类替换器还原出实际类型，否则拿到的是T这样的类型变量
+   */
+  private static List<Property> collectProperties(PsiClass psiClass) {
+    List<Property> propertyList = new ArrayList<>();
+    Set<String> handledNameSet = new HashSet<>();
+    for (PsiField declaredField : psiClass.getAllFields()) {
+      String propertyName = declaredField.getName();
+      if (!handledNameSet.add(propertyName)) {
+        continue;
+      }
+      // 用findFieldByName而非直接取遍历到的字段，子类遮蔽父类同名字段时它返回最派生的声明
+      PsiField field = psiClass.findFieldByName(propertyName, true);
+      if (null == field) {
+        field = declaredField;
+      }
+      propertyList.add(new Property(propertyName, resolveFieldType(psiClass, field)));
+    }
+    return propertyList;
+  }
+
+  private static PsiType resolveFieldType(PsiClass psiClass, PsiField field) {
+    PsiType fieldType = field.getType();
+    PsiClass declaringClass = field.getContainingClass();
+    if (null == declaringClass) {
+      return fieldType;
+    }
+    // 用可返回null的getClassSubstitutor，getSuperClassSubstitutor在两者无继承关系时会记录错误日志
+    PsiSubstitutor substitutor = TypeConversionUtil.getClassSubstitutor(declaringClass, psiClass, PsiSubstitutor.EMPTY);
+    return null == substitutor ? fieldType : substitutor.substitute(fieldType);
   }
 
   private static Map<String, Property> buildLowerCasePropertyMap(boolean ignoreCase, Map<String, Property> propertyMap) {

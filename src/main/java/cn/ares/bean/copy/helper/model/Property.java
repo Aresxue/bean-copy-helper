@@ -12,6 +12,7 @@
 package cn.ares.bean.copy.helper.model;
 
 import cn.ares.bean.copy.helper.constant.Mark;
+import com.intellij.psi.PsiPrimitiveType;
 import com.intellij.psi.PsiType;
 
 /**
@@ -77,8 +78,7 @@ public class Property {
   @Override
   public boolean equals(Object obj) {
     if (obj instanceof Property property) {
-      return name.equals(property.name)
-          && type.getCanonicalText().equals(property.type.getCanonicalText());
+      return name.equals(property.name) && typeEquals(type, property.type);
     }
     return false;
   }
@@ -86,9 +86,25 @@ public class Property {
   public boolean equalsIgnoreCase(Object obj) {
     if (obj instanceof Property property) {
       return name.equalsIgnoreCase(property.name)
-          && type.getCanonicalText().equalsIgnoreCase(property.type.getCanonicalText());
+          && (typeEquals(type, property.type)
+          || type.getCanonicalText().equalsIgnoreCase(property.type.getCanonicalText()));
     }
     return false;
+  }
+
+  /**
+   * 属性复制工具都会自动装拆箱，int和Integer视为同类型否则会误报类型不匹配
+   */
+  private static boolean typeEquals(PsiType left, PsiType right) {
+    if (left.getCanonicalText().equals(right.getCanonicalText())) {
+      return true;
+    }
+    return boxedEquals(left, right) || boxedEquals(right, left);
+  }
+
+  private static boolean boxedEquals(PsiType primitiveCandidate, PsiType boxedCandidate) {
+    return primitiveCandidate instanceof PsiPrimitiveType primitiveType
+        && boxedCandidate.getCanonicalText().equals(primitiveType.getBoxedTypeName());
   }
 
 }

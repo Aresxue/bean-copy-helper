@@ -105,33 +105,63 @@ public class GenerateMethodAction implements IntentionAction, PriorityAction {
     PsiClass targetClass = invoke.targetClass();
     String targetClassName = targetClass.getName();
     String referenceName = null == targetClassName ? "target" : CommonUtil.lowerFirst(targetClassName);
-    String codeText = String.format("%s%s %s = new %s();\n", linePrefix, targetClassName, referenceName, targetClassName);
-    int maxLength = codeText.length();
 
     PsiExpression[] expressions = methodCallExpression.getArgumentList().getExpressions();
     String sourceArgsName = expressions[0].getText();
 
     Set<String> commonPropertyNameSet = BeanCopyHelper.findCommonPropertyNameSet(invoke);
+    List<String> lineList;
+    if (invoke.sourceCollection()) {
+      lineList = buildCollectionLineList(linePrefix, invoke, targetClassName, referenceName, sourceArgsName, commonPropertyNameSet);
+    } else {
+      lineList = buildSingleLineList(linePrefix, targetClassName, referenceName, sourceArgsName, commonPropertyNameSet);
+    }
+
+    int maxLength = lineList.stream().mapToInt(String::length).max().orElse(1);
+    if (html) {
+      double fontSize = BeanCopyHelper.getFontSize(maxLength);
+      return lineList.stream()
+          .map(line -> buildPropertyHtmlPrefix(line, fontSize))
+          .collect(Collectors.joining("\n"));
+    } else {
+      return String.join("\n", lineList);
+    }
+  }
+
+  private List<String> buildSingleLineList(String linePrefix, String targetClassName, String referenceName, String sourceArgsName, Set<String> commonPropertyNameSet) {
     List<String> lineList = new ArrayList<>();
+    lineList.add(String.format("%s%s %s = new %s();", linePrefix, targetClassName, referenceName, targetClassName));
     for (String propertyName : commonPropertyNameSet) {
       // 将属性名的首字母大写
       String upperPropertyName = CommonUtil.upperFirst(propertyName);
-      String line = String.format("%s%s.set%s(%s.get%s());", linePrefix, referenceName, upperPropertyName, sourceArgsName, upperPropertyName);
-      lineList.add(line);
-      if (line.length() > maxLength) {
-        maxLength = line.length();
-      }
+      lineList.add(String.format("%s%s.set%s(%s.get%s());", linePrefix, referenceName, upperPropertyName, sourceArgsName, upperPropertyName));
     }
+    return lineList;
+  }
 
-    if (html) {
-      double fontSize = BeanCopyHelper.getFontSize(maxLength);
-      return buildPropertyHtmlPrefix(codeText, fontSize) +
-          lineList.stream()
-              .map(line -> buildPropertyHtmlPrefix(line, fontSize))
-              .collect(Collectors.joining("\n"));
-    } else {
-      return codeText + String.join("\n", lineList);
+  /**
+   * 源是集合时按遍历源集合逐个转换渲染，源类型取集合的元素类型
+   */
+  private List<String> buildCollectionLineList(String linePrefix, Result invoke, String targetClassName, String referenceName, String sourceArgsName, Set<String> commonPropertyNameSet) {
+    String sourceClassName = invoke.sourceClass().getName();
+    String elementTypeName = null == sourceClassName ? "Object" : sourceClassName;
+    String elementName = null == sourceClassName ? "source" : CommonUtil.lowerFirst(sourceClassName);
+    String resultListName = referenceName + "List";
+    // 循环体相对外层多缩进两个空格
+    String bodyPrefix = linePrefix + "  ";
+
+    List<String> lineList = new ArrayList<>();
+    lineList.add(String.format("%sList<%s> %s = new ArrayList<>();", linePrefix, targetClassName, resultListName));
+    lineList.add(String.format("%sfor (%s %s : %s) {", linePrefix, elementTypeName, elementName, sourceArgsName));
+    lineList.add(String.format("%s%s %s = new %s();", bodyPrefix, targetClassName, referenceName, targetClassName));
+    for (String propertyName : commonPropertyNameSet) {
+      // 将属性名的首字母大写
+      String upperPropertyName = CommonUtil.upperFirst(propertyName);
+      lineList.add(String.format("%s%s.set%s(%s.get%s());", bodyPrefix, referenceName, upperPropertyName, elementName, upperPropertyName));
     }
+    lineList.add(String.format("%s%s.add(%s);", bodyPrefix, resultListName, referenceName));
+    lineList.add(linePrefix + "}");
+    return lineList;
   }
 
 
