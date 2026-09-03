@@ -18,6 +18,7 @@ import cn.ares.bean.copy.helper.resolve.BeanCopyResolve;
 import cn.ares.bean.copy.helper.resolve.impl.ApacheBeanCopyResolveImpl;
 import cn.ares.bean.copy.helper.resolve.impl.SpringBeanCopyResolveImpl;
 import cn.ares.bean.copy.helper.util.LocaleSupport;
+import cn.ares.bean.copy.helper.util.PsiConstantUtil;
 import com.intellij.codeInspection.AbstractBaseJavaLocalInspectionTool;
 import com.intellij.codeInspection.InspectionManager;
 import com.intellij.codeInspection.ProblemDescriptor;
@@ -25,7 +26,6 @@ import com.intellij.psi.JavaRecursiveElementVisitor;
 import com.intellij.psi.PsiClass;
 import com.intellij.psi.PsiCodeBlock;
 import com.intellij.psi.PsiExpression;
-import com.intellij.psi.PsiLiteralExpression;
 import com.intellij.psi.PsiMethod;
 import com.intellij.psi.PsiMethodCallExpression;
 import com.intellij.psi.PsiReferenceExpression;
@@ -99,7 +99,8 @@ public class BeanCopyInspection extends AbstractBaseJavaLocalInspectionTool {
           List<Property> typeNotMatchList = sourcePropertyMap.values().stream()
               .filter(property -> TYPE_NOT_MATCH.equals(property.getMark())).toList();
 
-          if (!typeNotMatchList.isEmpty()) {
+          // 忽略属性没有解析完整时该属性可能实际已被忽略，报类型不匹配是误报
+          if (!typeNotMatchList.isEmpty() && invoke.ignorePropertiesResolved()) {
             String tips = typeNotMatchList.stream()
                 .map(property -> property.toString() + "  " + property.getMark().getIcon() + BeanCopyResolve.getProperty(targetPropertyMap, lowerCaseTargetPropertyMap, property.getName()).toString())
                 .collect(Collectors.joining("\n"));
@@ -127,20 +128,23 @@ public class BeanCopyInspection extends AbstractBaseJavaLocalInspectionTool {
         } else if (ApacheBeanCopyResolveImpl.isBeanCopyPropertyMethod(canonicalText)) {
           PsiExpression[] expressions = methodCallExpression.getArgumentList().getExpressions();
           PsiClass targetClass = PsiUtil.resolveClassInType(expressions[0].getType());
-          if (null != targetClass) {
-            if (expressions[1] instanceof PsiLiteralExpression literalExpression) {
-              String fieldName = literalExpression.getText().replace("\"", "");
-              if (Arrays.stream(targetClass.getAllFields()).noneMatch(field -> field.getName().equals(fieldName))) {
-                ProblemDescriptor problem = manager.createProblemDescriptor(
-                    methodCallExpression,
-                    LocaleSupport.formatMessage("apache.bean.copy.field.not.exist", targetClass.getName(), fieldName),
-                    true,
-                    WEAK_WARNING,
-                    isOnTheFly
-                );
-                problems.add(problem);
-              }
-            }
+          if (null == targetClass) {
+            return;
+          }
+          // 属性名常量化时求不出值，此时不报字段不存在，避免误报
+          String fieldName = PsiConstantUtil.evaluateString(expressions[1]);
+          if (null == fieldName) {
+            return;
+          }
+          if (Arrays.stream(targetClass.getAllFields()).noneMatch(field -> fieldName.equals(field.getName()))) {
+            ProblemDescriptor problem = manager.createProblemDescriptor(
+                methodCallExpression,
+                LocaleSupport.formatMessage("apache.bean.copy.field.not.exist", targetClass.getName(), fieldName),
+                true,
+                WEAK_WARNING,
+                isOnTheFly
+            );
+            problems.add(problem);
           }
         }
       }

@@ -362,6 +362,7 @@ public class ShowPropertiesCompareAction implements IntentionAction, PriorityAct
                   {}
                   {}
                   {}
+                  {}
                   <br/>
                 </div>
                 </body>
@@ -369,6 +370,7 @@ public class ShowPropertiesCompareAction implements IntentionAction, PriorityAct
                 """,
             titleStyle,
             title,
+            BeanCopyHelper.buildIgnorePropertiesUnresolvedHtml(result),
             samePropertiesHtml,
             typeNotMatchPropertiesHtml,
             ignoredPropertiesHtml,

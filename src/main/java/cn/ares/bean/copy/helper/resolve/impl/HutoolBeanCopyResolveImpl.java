@@ -13,17 +13,26 @@ package cn.ares.bean.copy.helper.resolve.impl;
 
 import cn.ares.bean.copy.helper.BeanCopyHelper;
 import cn.ares.bean.copy.helper.BeanCopyHelper.Result;
+import cn.ares.bean.copy.helper.model.IgnoreProperties;
 import cn.ares.bean.copy.helper.resolve.BeanCopyResolve;
+import cn.ares.bean.copy.helper.util.PsiConstantUtil;
 import com.intellij.psi.PsiClass;
 import com.intellij.psi.PsiClassObjectAccessExpression;
+import com.intellij.psi.PsiElement;
 import com.intellij.psi.PsiExpression;
-import com.intellij.psi.PsiLiteralExpression;
+import com.intellij.psi.PsiExpressionList;
 import com.intellij.psi.PsiMethodCallExpression;
+import com.intellij.psi.PsiMethodReferenceExpression;
+import com.intellij.psi.PsiNewExpression;
+import com.intellij.psi.PsiReferenceExpression;
 import com.intellij.psi.PsiType;
 import com.intellij.psi.PsiTypeElement;
+import com.intellij.psi.PsiTypes;
+import com.intellij.psi.PsiVariable;
 import com.intellij.psi.util.InheritanceUtil;
 import com.intellij.psi.util.PsiTypesUtil;
 import com.intellij.psi.util.PsiUtil;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -42,6 +51,24 @@ public class HutoolBeanCopyResolveImpl implements BeanCopyResolve {
   private static final String TO_BEAN_IGNORE_ERROR_METHOD_NAME = "toBeanIgnoreError";
   private static final String TO_BEAN_IGNORE_CASE_METHOD_NAME = "toBeanIgnoreCase";
   private static final String COPY_TO_LIST_METHOD_NAME = "copyToList";
+
+  private static final String COPY_OPTIONS_CLASS_NAME = "cn.hutool.core.bean.copier.CopyOptions";
+  private static final String CREATE_METHOD_NAME = "create";
+  private static final String SET_IGNORE_PROPERTIES_METHOD_NAME = "setIgnoreProperties";
+  private static final String SET_IGNORE_CASE_METHOD_NAME = "setIgnoreCase";
+  private static final String IGNORE_CASE_METHOD_NAME = "ignoreCase";
+
+  /**
+   * 链式配置层数有限，超过这个深度说明变量之间存在循环引用
+   */
+  private static final int COPY_OPTIONS_RESOLVE_MAX_DEPTH = 16;
+
+  /**
+   * 不影响属性名匹配也不产生忽略属性的链式方法，链上出现其他方法说明属性可能被改名或过滤，忽略属性集不再可信
+   */
+  private static final Set<String> HARMLESS_COPY_OPTIONS_METHOD_SET = Set.of("setIgnoreNullValue",
+      "ignoreNullValue", "setIgnoreError", "ignoreError", "setTransientSupport", "setOverride",
+      "setConverter", "setFieldValueEditor", "setAutoTransformCollection");
 
   /**
    * copyProperties以外支持的方法名，供BeanCopyHelper注册方法名预筛集合
@@ -92,27 +119,31 @@ public class HutoolBeanCopyResolveImpl implements BeanCopyResolve {
     }
 
     if (COPY_PROPERTIES_METHOD_NAME.equals(methodName)) {
-      return resolveCopyProperties(expressions, sourceClass, targetClass);
-    }
-    if (sourceCollection) {
-      return buildResult(sourceClass, targetClass, Set.of(), false, true);
+      return resolveCopyProperties(methodCallExpression, sourceClass, targetClass);
     }
 
     // toBeanIgnoreCase固定开启忽略大小写，其布尔参数控制的是ignoreError而非ignoreCase
     boolean ignoreCase = TO_BEAN_IGNORE_CASE_METHOD_NAME.equals(methodName);
-    // toBean系列没有可静态解析的忽略属性
-    return buildResult(sourceClass, targetClass, Set.of(), ignoreCase);
+    // toBean和copyToList的忽略属性只能来自CopyOptions
+    CopyOptionsContext copyOptionsContext = resolveCopyOptions(expressions, sourceClass, targetClass);
+    if (null == copyOptionsContext) {
+      return buildResult(sourceClass, targetClass, IgnoreProperties.RESOLVED_EMPTY, ignoreCase, sourceCollection);
+    }
+    return buildResult(sourceClass, targetClass, copyOptionsContext.toIgnoreProperties(),
+        ignoreCase || copyOptionsContext.ignoreCase, sourceCollection);
   }
 
-  private Result resolveCopyProperties(PsiExpression[] expressions, PsiClass sourceClass, PsiClass targetClass) {
-    // 处理忽略属性
-    Set<String> ignoreProperties = BeanCopyHelper.getIgnoreProperties(expressions);
-    boolean ignoreCase;
-    if (expressions.length >= 3 && expressions[2] instanceof PsiLiteralExpression literalExpression) {
-      ignoreCase = "true".equals(literalExpression.getText().replace("\"", ""));
-    } else {
-      ignoreCase = false;
+  private Result resolveCopyProperties(PsiMethodCallExpression methodCallExpression, PsiClass sourceClass, PsiClass targetClass) {
+    PsiExpression[] expressions = methodCallExpression.getArgumentList().getExpressions();
+    CopyOptionsContext copyOptionsContext = resolveCopyOptions(expressions, sourceClass, targetClass);
+    if (null != copyOptionsContext) {
+      return buildResult(sourceClass, targetClass, copyOptionsContext.toIgnoreProperties(), copyOptionsContext.ignoreCase);
     }
+
+    // 处理忽略属性
+    IgnoreProperties ignoreProperties = BeanCopyHelper.getIgnoreProperties(methodCallExpression, sourceClass, targetClass);
+    // 第三个参数是ignoreCase的重载，求不出值时按不忽略大小写处理
+    boolean ignoreCase = expressions.length >= 3 && Boolean.TRUE.equals(PsiConstantUtil.evaluateBoolean(expressions[2]));
     return buildResult(sourceClass, targetClass, ignoreProperties, ignoreCase);
   }
 
@@ -137,6 +168,165 @@ public class HutoolBeanCopyResolveImpl implements BeanCopyResolve {
    */
   private boolean isMapClass(PsiClass psiClass) {
     return InheritanceUtil.isInheritor(psiClass, JAVA_UTIL_MAP);
+  }
+
+  /**
+   * CopyOptions里的忽略属性沿链式调用逐层配置，不解析会把已被忽略的属性当成已复制
+   * 返回null表示这个重载没有CopyOptions参数
+   */
+  private CopyOptionsContext resolveCopyOptions(PsiExpression[] expressions, PsiClass sourceClass, PsiClass targetClass) {
+    if (expressions.length < 3 || !InheritanceUtil.isInheritor(expressions[2].getType(), COPY_OPTIONS_CLASS_NAME)) {
+      return null;
+    }
+    CopyOptionsContext context = new CopyOptionsContext();
+    collectCopyOptions(expressions[2], context, sourceClass, targetClass, 0);
+    return context;
+  }
+
+  private void collectCopyOptions(PsiExpression expression, CopyOptionsContext context,
+      PsiClass sourceClass, PsiClass targetClass, int depth) {
+    if (null == expression || depth > COPY_OPTIONS_RESOLVE_MAX_DEPTH) {
+      context.resolved = false;
+      return;
+    }
+    if (expression instanceof PsiMethodCallExpression methodCallExpression) {
+      collectCopyOptionsByMethodCall(methodCallExpression, context, sourceClass, targetClass, depth);
+      return;
+    }
+    if (expression instanceof PsiNewExpression newExpression) {
+      // new CopyOptions(Class, boolean, String...)的参数和CopyOptions#create一致
+      collectCopyOptionsArguments(newExpression.getArgumentList(), context, sourceClass, targetClass);
+      return;
+    }
+    if (expression instanceof PsiReferenceExpression referenceExpression) {
+      collectCopyOptionsByReference(referenceExpression, context, sourceClass, targetClass, depth);
+      return;
+    }
+    // 三元、方法形参传入等形态确定不了实际配置
+    context.resolved = false;
+  }
+
+  private void collectCopyOptionsByMethodCall(PsiMethodCallExpression methodCallExpression, CopyOptionsContext context,
+      PsiClass sourceClass, PsiClass targetClass, int depth) {
+    PsiReferenceExpression methodExpression = methodCallExpression.getMethodExpression();
+    String methodName = methodExpression.getReferenceName();
+    if (null == methodName) {
+      context.resolved = false;
+      return;
+    }
+    collectCopyOptionsByMethodName(methodName, methodCallExpression.getArgumentList(), context, sourceClass, targetClass);
+    // 链式配置的上一层是当前调用的调用者，继续往内层解析
+    collectCopyOptions(methodExpression.getQualifierExpression(), context, sourceClass, targetClass, depth + 1);
+  }
+
+  private void collectCopyOptionsByMethodName(String methodName, PsiExpressionList argumentList,
+      CopyOptionsContext context, PsiClass sourceClass, PsiClass targetClass) {
+    if (SET_IGNORE_PROPERTIES_METHOD_NAME.equals(methodName)) {
+      collectIgnoreProperties(argumentList.getExpressions(), 0, context, sourceClass, targetClass);
+      return;
+    }
+    if (CREATE_METHOD_NAME.equals(methodName)) {
+      collectCopyOptionsArguments(argumentList, context, sourceClass, targetClass);
+      return;
+    }
+    // 无参的ignoreCase等价于setIgnoreCase(true)，setIgnoreCase的值求不出时和布尔参数重载一样按不忽略处理
+    if (IGNORE_CASE_METHOD_NAME.equals(methodName)) {
+      context.ignoreCase = true;
+      return;
+    }
+    if (SET_IGNORE_CASE_METHOD_NAME.equals(methodName)) {
+      PsiExpression[] expressions = argumentList.getExpressions();
+      context.ignoreCase |= expressions.length >= 1 && Boolean.TRUE.equals(PsiConstantUtil.evaluateBoolean(expressions[0]));
+      return;
+    }
+    // setFieldMapping、setFieldNameEditor这类会改变属性名的匹配关系，属性比对结果不再可信
+    if (!HARMLESS_COPY_OPTIONS_METHOD_SET.contains(methodName)) {
+      context.resolved = false;
+    }
+  }
+
+  /**
+   * @see cn.hutool.core.bean.copier.CopyOptions#create(Class, boolean, String...)
+   */
+  private void collectCopyOptionsArguments(PsiExpressionList argumentList, CopyOptionsContext context,
+      PsiClass sourceClass, PsiClass targetClass) {
+    if (null == argumentList) {
+      context.resolved = false;
+      return;
+    }
+    PsiExpression[] expressions = argumentList.getExpressions();
+    // CopyOptions#create()没有参数
+    if (expressions.length == 0) {
+      return;
+    }
+    if (expressions.length == 1) {
+      context.resolved = false;
+      return;
+    }
+    // editable限定了可复制的属性范围，非null时属性可能被它挡掉
+    if (!PsiTypes.nullType().equals(expressions[0].getType())) {
+      context.resolved = false;
+    }
+    collectIgnoreProperties(expressions, 2, context, sourceClass, targetClass);
+  }
+
+  private void collectIgnoreProperties(PsiExpression[] expressions, int startIndex, CopyOptionsContext context,
+      PsiClass sourceClass, PsiClass targetClass) {
+    for (int i = startIndex; i < expressions.length; i++) {
+      PsiExpression expression = expressions[i];
+      if (expression instanceof PsiMethodReferenceExpression methodReferenceExpression) {
+        collectIgnorePropertyByMethodReference(methodReferenceExpression, context, sourceClass, targetClass);
+        continue;
+      }
+      // Lambda等无法静态求值的形态由它标记为未解析
+      context.resolved &= BeanCopyHelper.collectIgnoreProperty(expression, context.ignorePropertyNameSet, sourceClass, targetClass);
+    }
+  }
+
+  /**
+   * @see cn.hutool.core.bean.copier.CopyOptions#setIgnoreProperties(cn.hutool.core.lang.func.Func1[])
+   */
+  private void collectIgnorePropertyByMethodReference(PsiMethodReferenceExpression methodReferenceExpression,
+      CopyOptionsContext context, PsiClass sourceClass, PsiClass targetClass) {
+    String getterName = methodReferenceExpression.getReferenceName();
+    String propertyName = BeanCopyHelper.resolvePropertyNameByGetter(getterName, sourceClass);
+    if (null == propertyName) {
+      propertyName = BeanCopyHelper.resolvePropertyNameByGetter(getterName, targetClass);
+    }
+    if (null == propertyName) {
+      context.resolved = false;
+      return;
+    }
+    context.ignorePropertyNameSet.add(propertyName);
+  }
+
+  private void collectCopyOptionsByReference(PsiReferenceExpression referenceExpression, CopyOptionsContext context,
+      PsiClass sourceClass, PsiClass targetClass, int depth) {
+    PsiElement element = referenceExpression.resolve();
+    // 链的起点是CopyOptions类名，走到这里说明整条链都已解析完
+    if (element instanceof PsiClass) {
+      return;
+    }
+    if (element instanceof PsiVariable variable) {
+      collectCopyOptions(variable.getInitializer(), context, sourceClass, targetClass, depth + 1);
+      return;
+    }
+    context.resolved = false;
+  }
+
+  /**
+   * 链式配置沿qualifier逐层收集，resolved为false表示链上有无法静态求出的配置
+   */
+  private static final class CopyOptionsContext {
+
+    private final Set<String> ignorePropertyNameSet = new HashSet<>();
+    private boolean resolved = true;
+    private boolean ignoreCase;
+
+    private IgnoreProperties toIgnoreProperties() {
+      return new IgnoreProperties(ignorePropertyNameSet, resolved);
+    }
+
   }
 
   @Override

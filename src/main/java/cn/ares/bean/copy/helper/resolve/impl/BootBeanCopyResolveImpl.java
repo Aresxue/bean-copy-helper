@@ -13,12 +13,13 @@ package cn.ares.bean.copy.helper.resolve.impl;
 
 import cn.ares.bean.copy.helper.BeanCopyHelper;
 import cn.ares.bean.copy.helper.BeanCopyHelper.Result;
+import cn.ares.bean.copy.helper.model.IgnoreProperties;
 import cn.ares.bean.copy.helper.resolve.BeanCopyResolve;
+import cn.ares.bean.copy.helper.util.PsiConstantUtil;
 import com.intellij.psi.PsiClass;
 import com.intellij.psi.PsiClassObjectAccessExpression;
 import com.intellij.psi.PsiExpression;
 import com.intellij.psi.PsiExpressionList;
-import com.intellij.psi.PsiLiteralExpression;
 import com.intellij.psi.PsiMethod;
 import com.intellij.psi.PsiMethodCallExpression;
 import com.intellij.psi.PsiModifier;
@@ -67,7 +68,7 @@ public class BootBeanCopyResolveImpl implements BeanCopyResolve {
     }
 
     // 处理忽略属性
-    Set<String> ignoreProperties = BeanCopyHelper.getIgnoreProperties(expressions);
+    IgnoreProperties ignoreProperties = BeanCopyHelper.getIgnoreProperties(methodCallExpression, sourceClass, targetClass);
     return buildResult(sourceClass, targetClass, ignoreProperties);
   }
 
@@ -99,8 +100,7 @@ public class BootBeanCopyResolveImpl implements BeanCopyResolve {
 
     // 暂时排除BeanCopyUtil#copy(SOURCE, Class<TARGET>, boolean, Converter)
     if (parameters.length == 4 && expressions.length >= 3
-        && expressions[2] instanceof PsiLiteralExpression literalExpression
-        && Boolean.TRUE.equals(literalExpression.getValue())) {
+        && Boolean.TRUE.equals(PsiConstantUtil.evaluateBoolean(expressions[2]))) {
       return false;
     }
     return true;

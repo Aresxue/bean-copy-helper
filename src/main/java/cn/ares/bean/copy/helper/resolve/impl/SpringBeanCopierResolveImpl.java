@@ -13,14 +13,14 @@ package cn.ares.bean.copy.helper.resolve.impl;
 
 import cn.ares.bean.copy.helper.BeanCopyHelper;
 import cn.ares.bean.copy.helper.BeanCopyHelper.Result;
+import cn.ares.bean.copy.helper.model.IgnoreProperties;
 import cn.ares.bean.copy.helper.resolve.BeanCopyResolve;
+import cn.ares.bean.copy.helper.util.PsiConstantUtil;
 import com.intellij.psi.PsiClass;
 import com.intellij.psi.PsiExpression;
-import com.intellij.psi.PsiLiteralExpression;
 import com.intellij.psi.PsiMethodCallExpression;
 import com.intellij.psi.PsiTypeElement;
 import com.intellij.psi.util.PsiTypesUtil;
-import java.util.Set;
 
 /**
  * @author Aresxue
@@ -45,12 +45,8 @@ public class SpringBeanCopierResolveImpl implements BeanCopyResolve {
     }
     // 忽略useConverter为true的场景因为不知道它内部的逻辑
     PsiExpression[] expressions = methodCallExpression.getArgumentList().getExpressions();
-    if (expressions[2] != null && expressions[2] instanceof PsiLiteralExpression literalExpression
-        && "true".equals(literalExpression.getText().replace("\"", ""))) {
-      return false;
-    }
-
-    return true;
+    // 参数不足说明还没写完，此时不做排除
+    return expressions.length < 3 || !Boolean.TRUE.equals(PsiConstantUtil.evaluateBoolean(expressions[2]));
   }
 
   @Override
@@ -63,9 +59,8 @@ public class SpringBeanCopierResolveImpl implements BeanCopyResolve {
       return null;
     }
 
-    // 处理忽略属性
-    Set<String> ignoreProperties = BeanCopyHelper.getIgnoreProperties(expressions);
-    return buildResult(sourceClass, targetClass, ignoreProperties);
+    // BeanCopier.create的第三个参数是useConverter，没有忽略属性参数
+    return buildResult(sourceClass, targetClass, IgnoreProperties.RESOLVED_EMPTY);
   }
 
 }

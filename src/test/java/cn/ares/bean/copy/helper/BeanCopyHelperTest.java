@@ -11,6 +11,7 @@
  */
 package cn.ares.bean.copy.helper;
 
+import cn.ares.bean.copy.helper.BeanCopyHelper.Result;
 import cn.ares.bean.copy.helper.model.CopyPropertiesReferenceIndex;
 import cn.ares.bean.copy.helper.resolve.impl.BootBeanCopyResolveImpl;
 import com.intellij.psi.PsiClass;
@@ -46,7 +47,7 @@ public class BeanCopyHelperTest extends LightJavaCodeInsightFixtureTestCase {
     myFixture.addClass("package org.springframework.beans;"
         + "public class BeanUtils {"
         + " public static void copyProperties(Object source, Object target) {}"
-        + " public static void copyProperties(Object source, Object target, String[] ignoreProperties) {} }");
+        + " public static void copyProperties(Object source, Object target, String... ignoreProperties) {} }");
   }
 
   @Override
@@ -198,22 +199,194 @@ public class BeanCopyHelperTest extends LightJavaCodeInsightFixtureTestCase {
   }
 
   /**
-   * 忽略属性写成常量或数组时同样要生效，否则被忽略的属性会被误判为已复制
+   * 忽略属性写成数组常量时同样要生效，否则被忽略的属性会被误判为已复制
    */
   public void testMatchesPropertyCopyWithIgnorePropertiesConstant() {
     myFixture.addClass("public class Const { public static final String[] IGNORE = new String[]{\"secret\"}; }");
-    myFixture.addClass("public class Source { private String secret; private String name;"
-        + " public String getSecret() { return secret; } public String getName() { return name; } }");
-    myFixture.addClass("public class Target { private String secret; private String name;"
-        + " public void setSecret(String secret) {} public void setName(String name) {} }");
+
+    assertSecretIgnored(configureIgnoreCase("Const.IGNORE"));
+  }
+
+  /**
+   * 字符串常量是最常见的写法，原实现只认字面量，取不到值就静默丢弃
+   */
+  public void testMatchesPropertyCopyWithIgnorePropertiesStringConstant() {
+    myFixture.addClass("public class Const { public static final String SECRET = \"secret\"; }");
+
+    assertSecretIgnored(configureIgnoreCase("Const.SECRET"));
+  }
+
+  /**
+   * 常量层层转发时要一路解析到最终的字面量
+   */
+  public void testMatchesPropertyCopyWithIgnorePropertiesConstantChain() {
+    myFixture.addClass("public class Level1 { public static final String SECRET = \"secret\"; }");
+    myFixture.addClass("public class Level2 { public static final String SECRET = Level1.SECRET; }");
+    myFixture.addClass("public class Level3 { public static final String SECRET = Level2.SECRET; }");
+
+    assertSecretIgnored(configureIgnoreCase("Level3.SECRET"));
+  }
+
+  /**
+   * 常量拼接、括号和三元都是编译期常量，平台的常量求值能一次覆盖
+   */
+  public void testMatchesPropertyCopyWithIgnorePropertiesConstantExpression() {
+    myFixture.addClass("public class Const { public static final String PREFIX = \"se\"; }");
+
+    assertSecretIgnored(configureIgnoreCase("(true ? Const.PREFIX + \"cret\" : \"other\")"));
+  }
+
+  /**
+   * 数组元素也可能是常量，展开数组后每个元素都要继续求值
+   */
+  public void testMatchesPropertyCopyWithIgnorePropertiesConstantInArray() {
+    myFixture.addClass("public class Const { public static final String SECRET = \"secret\"; }");
+
+    assertSecretIgnored(configureIgnoreCase("new String[]{Const.SECRET}"));
+  }
+
+  /**
+   * 非final局部变量不是编译期常量，求值拿不到值，要按初始值还原
+   */
+  public void testMatchesPropertyCopyWithIgnorePropertiesLocalVariable() {
+    addSecretAndNameClasses();
     PsiFile file = myFixture.configureByText("Demo.java",
         "class Demo { void run() {"
-            + " org.springframework.beans.BeanUtils.copyProperties(new Source(), new Target(), Const.IGNORE);"
+            + " String ignore = \"secret\";"
+            + " org.springframework.beans.BeanUtils.copyProperties(new Source(), new Target(), ignore);"
+            + " } }");
+
+    assertSecretIgnored(findBeanCopyCall(file));
+  }
+
+  /**
+   * lombok的@FieldNameConstants生成的常量没有初始值，求值和初始值都拿不到，只能按结构还原出属性名
+   * 这里手写一个没有初始值的Fields内部类来模拟这种light element
+   */
+  public void testMatchesPropertyCopyWithFieldNameConstants() {
+    addFieldNameConstantsAnnotation();
+    addSecretAndNameClasses();
+    myFixture.addClass("@lombok.experimental.FieldNameConstants"
+        + " public class LombokSource { private String secret; private String name;"
+        + " public String getSecret() { return secret; } public String getName() { return name; }"
+        + " public static final class Fields { public static final String secret; public static final String name; } }");
+    PsiFile file = myFixture.configureByText("Demo.java",
+        "class Demo { void run() {"
+            + " org.springframework.beans.BeanUtils.copyProperties(new LombokSource(), new Target(), LombokSource.Fields.secret);"
+            + " } }");
+
+    assertSecretIgnored(findBeanCopyCall(file));
+  }
+
+  /**
+   * 内部类名被innerTypeName改过时结构判定同样要认，否则会退化成按名字兜底
+   */
+  public void testMatchesPropertyCopyWithFieldNameConstantsCustomInnerTypeName() {
+    addFieldNameConstantsAnnotation();
+    addSecretAndNameClasses();
+    myFixture.addClass("@lombok.experimental.FieldNameConstants(innerTypeName = \"Names\")"
+        + " public class LombokSource { private String secret; private String name;"
+        + " public String getSecret() { return secret; } public String getName() { return name; }"
+        + " public static final class Names { public static final String secret; public static final String name; } }");
+    PsiFile file = myFixture.configureByText("Demo.java",
+        "class Demo { void run() {"
+            + " org.springframework.beans.BeanUtils.copyProperties(new LombokSource(), new Target(), LombokSource.Names.secret);"
+            + " } }");
+
+    assertSecretIgnored(findBeanCopyCall(file));
+  }
+
+  /**
+   * 初始值求不出来但常量名恰是属性名时按名字兜底，覆盖lombok插件未启用等拿不到值的情形
+   */
+  public void testMatchesPropertyCopyWithIgnorePropertiesByName() {
+    myFixture.addClass("public class Const { public static final String secret = resolve();"
+        + " private static String resolve() { return \"secret\"; } }");
+
+    assertSecretIgnored(configureIgnoreCase("Const.secret"));
+  }
+
+  /**
+   * 忽略属性来自方法调用时值无法静态求出，此时不能断言任何属性一定会被复制
+   */
+  public void testMatchesPropertyCopyWithIgnorePropertiesUnresolved() {
+    myFixture.addClass("public class Const { public static String resolve() { return \"secret\"; } }");
+    PsiMethodCallExpression call = configureIgnoreCase("Const.resolve()");
+
+    assertFalse(BeanCopyHelper.matchesPropertyCopy(findMethod("Target", "setSecret", "String"), call));
+    assertFalse(BeanCopyHelper.matchesPropertyCopy(findMethod("Target", "setName", "String"), call));
+    Result result = BeanCopyHelper.invoke(call);
+    assertNotNull(result);
+    assertFalse(result.ignorePropertiesResolved());
+  }
+
+  /**
+   * 第三个参数是ignoreCase的重载没有忽略属性，布尔值不能被当成属性名收进忽略集
+   */
+  public void testMatchesPropertyCopyWithIgnoreCaseArgument() {
+    addHutoolClasses();
+    addSecretAndNameClasses();
+    PsiFile file = myFixture.configureByText("Demo.java",
+        "class Demo { void run() {"
+            + " cn.hutool.core.bean.BeanUtil.copyProperties(new Source(), new Target(), true);"
             + " } }");
     PsiMethodCallExpression call = findBeanCopyCall(file);
 
-    assertFalse(BeanCopyHelper.matchesPropertyCopy(findMethod("Target", "setSecret", "String"), call));
-    assertTrue(BeanCopyHelper.matchesPropertyCopy(findMethod("Target", "setName", "String"), call));
+    Result result = BeanCopyHelper.invoke(call);
+    assertNotNull(result);
+    assertTrue(result.ignorePropertiesResolved());
+    assertTrue(result.ignoredProperties().isEmpty());
+    assertTrue(BeanCopyHelper.matchesPropertyCopy(findMethod("Target", "setSecret", "String"), call));
+  }
+
+  /**
+   * CopyOptions里的忽略属性沿链式调用配置，不解析会把已忽略的属性当成已复制
+   */
+  public void testMatchesPropertyCopyWithCopyOptionsIgnoreProperties() {
+    addHutoolClasses();
+    addSecretAndNameClasses();
+    myFixture.addClass("public class Const { public static final String SECRET = \"secret\"; }");
+    PsiFile file = myFixture.configureByText("Demo.java",
+        "class Demo { void run() {"
+            + " cn.hutool.core.bean.BeanUtil.copyProperties(new Source(), new Target(),"
+            + " cn.hutool.core.bean.copier.CopyOptions.create().ignoreNullValue().setIgnoreProperties(Const.SECRET));"
+            + " } }");
+
+    assertSecretIgnored(findBeanCopyCall(file));
+  }
+
+  /**
+   * Func1形式用Getter方法引用指定忽略属性，要反查出它对应的属性名
+   */
+  public void testMatchesPropertyCopyWithCopyOptionsMethodReference() {
+    addHutoolClasses();
+    addSecretAndNameClasses();
+    PsiFile file = myFixture.configureByText("Demo.java",
+        "class Demo { void run() {"
+            + " cn.hutool.core.bean.BeanUtil.copyProperties(new Source(), new Target(),"
+            + " cn.hutool.core.bean.copier.CopyOptions.create().setIgnoreProperties(Source::getSecret));"
+            + " } }");
+
+    assertSecretIgnored(findBeanCopyCall(file));
+  }
+
+  /**
+   * 链上出现setFieldMapping这类会改变属性名匹配关系的配置时，属性比对结果不再可信
+   */
+  public void testMatchesPropertyCopyWithCopyOptionsFieldMapping() {
+    addHutoolClasses();
+    addSecretAndNameClasses();
+    PsiFile file = myFixture.configureByText("Demo.java",
+        "class Demo { void run(java.util.Map<String, String> fieldMapping) {"
+            + " cn.hutool.core.bean.BeanUtil.copyProperties(new Source(), new Target(),"
+            + " cn.hutool.core.bean.copier.CopyOptions.create().setFieldMapping(fieldMapping));"
+            + " } }");
+    PsiMethodCallExpression call = findBeanCopyCall(file);
+
+    Result result = BeanCopyHelper.invoke(call);
+    assertNotNull(result);
+    assertFalse(result.ignorePropertiesResolved());
+    assertFalse(BeanCopyHelper.matchesPropertyCopy(findMethod("Target", "setName", "String"), call));
   }
 
   /**
@@ -256,10 +429,66 @@ public class BeanCopyHelperTest extends LightJavaCodeInsightFixtureTestCase {
   }
 
   /**
+   * 构造一次带忽略属性的Spring属性复制现场，源和目标都有secret与name两个属性
+   */
+  private PsiMethodCallExpression configureIgnoreCase(String ignoreArgumentsText) {
+    addSecretAndNameClasses();
+    PsiFile file = myFixture.configureByText("Demo.java",
+        "class Demo { void run() {"
+            + " org.springframework.beans.BeanUtils.copyProperties(new Source(), new Target(), " + ignoreArgumentsText + ");"
+            + " } }");
+    return findBeanCopyCall(file);
+  }
+
+  private void addSecretAndNameClasses() {
+    myFixture.addClass("public class Source { private String secret; private String name;"
+        + " public String getSecret() { return secret; } public String getName() { return name; } }");
+    myFixture.addClass("public class Target { private String secret; private String name;"
+        + " public void setSecret(String secret) {} public void setName(String name) {} }");
+  }
+
+  /**
+   * 工程没有依赖lombok，按注解全限名匹配的判定只需要一个同名注解桩
+   */
+  private void addFieldNameConstantsAnnotation() {
+    myFixture.addClass("package lombok.experimental;"
+        + "public @interface FieldNameConstants { String innerTypeName() default \"\"; }");
+  }
+
+  private void addHutoolClasses() {
+    myFixture.addClass("package cn.hutool.core.lang.func;"
+        + "public interface Func1<P, R> { R call(P parameter) throws Exception; }");
+    myFixture.addClass("package cn.hutool.core.bean.copier;"
+        + "public class CopyOptions {"
+        + " public static CopyOptions create() { return new CopyOptions(); }"
+        + " public CopyOptions setIgnoreProperties(String... ignoreProperties) { return this; }"
+        + " public CopyOptions setIgnoreProperties(cn.hutool.core.lang.func.Func1<?, ?>... funcs) { return this; }"
+        + " public CopyOptions setIgnoreCase(boolean ignoreCase) { return this; }"
+        + " public CopyOptions ignoreNullValue() { return this; }"
+        + " public CopyOptions setFieldMapping(java.util.Map<String, String> fieldMapping) { return this; } }");
+    myFixture.addClass("package cn.hutool.core.bean;"
+        + "public class BeanUtil {"
+        + " public static void copyProperties(Object source, Object target, String... ignoreProperties) {}"
+        + " public static void copyProperties(Object source, Object target, boolean ignoreCase) {}"
+        + " public static void copyProperties(Object source, Object target, cn.hutool.core.bean.copier.CopyOptions copyOptions) {} }");
+  }
+
+  /**
+   * secret被忽略后其Setter不再是复制的引用方，name不受影响，且忽略属性解析完整
+   */
+  private void assertSecretIgnored(PsiMethodCallExpression call) {
+    assertFalse(BeanCopyHelper.matchesPropertyCopy(findMethod("Target", "setSecret", "String"), call));
+    assertTrue(BeanCopyHelper.matchesPropertyCopy(findMethod("Target", "setName", "String"), call));
+    Result result = BeanCopyHelper.invoke(call);
+    assertNotNull(result);
+    assertTrue(result.ignorePropertiesResolved());
+    assertTrue(result.ignoredProperties().toString(), result.ignoredProperties().contains("secret"));
+  }
+
+  /**
    * 构造一次Spring属性复制的调用现场，返回承载调用的文件
    */
-  private PsiFile configureCopyCase(String sourceClassText, String targetClassText) {
-    myFixture.addClass(sourceClassText.replace("class Source", "public class Source"));
+  private PsiFile configureCopyCase(String sourceClassText, String targetClassText) {    myFixture.addClass(sourceClassText.replace("class Source", "public class Source"));
     myFixture.addClass(targetClassText.replace("class Target", "public class Target"));
     return myFixture.configureByText("Demo.java",
         "class Demo { void run() {"

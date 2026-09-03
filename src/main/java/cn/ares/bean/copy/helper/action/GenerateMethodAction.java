@@ -195,7 +195,7 @@ public class GenerateMethodAction implements IntentionAction, PriorityAction {
 
 
     String commentWithIndent = buildSetterMethod("", methodCallExpression, invoke, true);
-    return new Html(commentWithIndent);
+    return new Html(BeanCopyHelper.buildIgnorePropertiesUnresolvedHtml(invoke) + commentWithIndent);
   }
 
 

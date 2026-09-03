@@ -12,6 +12,7 @@
 package cn.ares.bean.copy.helper.resolve.impl;
 
 import cn.ares.bean.copy.helper.BeanCopyHelper.Result;
+import cn.ares.bean.copy.helper.model.IgnoreProperties;
 import cn.ares.bean.copy.helper.resolve.BeanCopyResolve;
 import com.intellij.psi.PsiClass;
 import com.intellij.psi.PsiExpression;
@@ -57,8 +58,7 @@ public class ApacheBeanCopyResolveImpl implements BeanCopyResolve {
     }
 
     // apache没有ignoreProperties参数
-    Set<String> ignoreProperties = Set.of();
-    return buildResult(sourceClass, targetClass, ignoreProperties);
+    return buildResult(sourceClass, targetClass, IgnoreProperties.RESOLVED_EMPTY);
   }
 
 

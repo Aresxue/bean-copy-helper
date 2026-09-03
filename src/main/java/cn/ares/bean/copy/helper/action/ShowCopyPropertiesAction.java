@@ -166,7 +166,7 @@ public class ShowCopyPropertiesAction implements IntentionAction, PriorityAction
                   
                     <br/>%s
                   */""", copyPropertiesToMessage)));
-    return new Html(commentText + "<br>&nbsp;</br>");
+    return new Html(BeanCopyHelper.buildIgnorePropertiesUnresolvedHtml(result) + commentText + "<br>&nbsp;</br>");
   }
 
   @Override

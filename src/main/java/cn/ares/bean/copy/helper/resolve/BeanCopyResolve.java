@@ -13,6 +13,7 @@ package cn.ares.bean.copy.helper.resolve;
 
 import cn.ares.bean.copy.helper.BeanCopyHelper;
 import cn.ares.bean.copy.helper.BeanCopyHelper.Result;
+import cn.ares.bean.copy.helper.model.IgnoreProperties;
 import cn.ares.bean.copy.helper.model.Property;
 import cn.ares.bean.copy.helper.util.CommonUtil;
 import com.intellij.psi.PsiClass;
@@ -55,18 +56,18 @@ public interface BeanCopyResolve {
    */
   Result resolve(PsiMethodCallExpression methodCallExpression);
 
-  default Result buildResult(PsiClass sourceClass, PsiClass targetClass, Set<String> ignoreProperties) {
+  default Result buildResult(PsiClass sourceClass, PsiClass targetClass, IgnoreProperties ignoreProperties) {
     return buildResult(sourceClass, targetClass, ignoreProperties, false);
   }
 
-  default Result buildResult(PsiClass sourceClass, PsiClass targetClass, Set<String> ignoreProperties, boolean ignoreCase) {
+  default Result buildResult(PsiClass sourceClass, PsiClass targetClass, IgnoreProperties ignoreProperties, boolean ignoreCase) {
     return buildResult(sourceClass, targetClass, ignoreProperties, ignoreCase, false);
   }
 
   /**
    * sourceCollection标识源是集合，用于生成方法时按批量转换渲染
    */
-  default Result buildResult(PsiClass sourceClass, PsiClass targetClass, Set<String> ignoreProperties, boolean ignoreCase, boolean sourceCollection) {
+  default Result buildResult(PsiClass sourceClass, PsiClass targetClass, IgnoreProperties ignoreProperties, boolean ignoreCase, boolean sourceCollection) {
     // 先收集一遍
     List<Property> sourceProperties = collectProperties(sourceClass);
     List<Property> targetProperties = collectProperties(targetClass);
@@ -78,10 +79,11 @@ public interface BeanCopyResolve {
     Map<String, Property> lowerCaseTargetPropertyMap = buildLowerCasePropertyMap(ignoreCase, targetPropertyMap);
 
     // 再标记一遍
-    sourceProperties.forEach(property -> BeanCopyHelper.markProperties(ignoreProperties, targetPropertyMap, lowerCaseTargetPropertyMap, property));
-    targetProperties.forEach(property -> BeanCopyHelper.markProperties(ignoreProperties, sourcePropertyMap, lowerCaseSourcePropertyMap, property));
+    Set<String> ignorePropertyNameSet = ignoreProperties.propertyNameSet();
+    sourceProperties.forEach(property -> BeanCopyHelper.markProperties(ignorePropertyNameSet, targetPropertyMap, lowerCaseTargetPropertyMap, property));
+    targetProperties.forEach(property -> BeanCopyHelper.markProperties(ignorePropertyNameSet, sourcePropertyMap, lowerCaseSourcePropertyMap, property));
 
-    return new Result(sourceClass, targetClass, sourcePropertyMap, targetPropertyMap, lowerCaseSourcePropertyMap, lowerCaseTargetPropertyMap, ignoreProperties, sourceCollection);
+    return new Result(sourceClass, targetClass, sourcePropertyMap, targetPropertyMap, lowerCaseSourcePropertyMap, lowerCaseTargetPropertyMap, ignorePropertyNameSet, ignoreProperties.resolved(), sourceCollection);
   }
 
   /**

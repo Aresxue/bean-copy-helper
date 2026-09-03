@@ -215,6 +215,11 @@ nbdist/
 # flatten-maven-plugin
 .flattened-pom.xml
 
+
+
+### macOS Files
+.DS_Store
+
 .intellijPlatform/
 .intellijPlatform/**
 caches/

@@ -13,6 +13,7 @@ package cn.ares.bean.copy.helper.resolve.impl;
 
 import cn.ares.bean.copy.helper.BeanCopyHelper;
 import cn.ares.bean.copy.helper.BeanCopyHelper.Result;
+import cn.ares.bean.copy.helper.model.IgnoreProperties;
 import cn.ares.bean.copy.helper.resolve.BeanCopyResolve;
 import com.intellij.psi.PsiClass;
 import com.intellij.psi.PsiExpression;
@@ -21,7 +22,6 @@ import com.intellij.psi.PsiMethodCallExpression;
 import com.intellij.psi.PsiType;
 import com.intellij.psi.util.PsiUtil;
 import java.util.Optional;
-import java.util.Set;
 
 /**
  * @author Aresxue
@@ -84,7 +84,7 @@ public class SpringBeanCopyResolveImpl implements BeanCopyResolve {
     }
 
     // 处理忽略属性
-    Set<String> ignoreProperties = BeanCopyHelper.getIgnoreProperties(expressions);
+    IgnoreProperties ignoreProperties = BeanCopyHelper.getIgnoreProperties(methodCallExpression, sourceClass, targetClass);
     return buildResult(sourceClass, targetClass, ignoreProperties);
   }
 

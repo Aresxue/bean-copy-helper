@@ -13,6 +13,7 @@ package cn.ares.bean.copy.helper;
 
 import cn.ares.bean.copy.helper.constant.Mark;
 import cn.ares.bean.copy.helper.model.CopyPropertiesReferenceIndex;
+import cn.ares.bean.copy.helper.model.IgnoreProperties;
 import cn.ares.bean.copy.helper.model.Property;
 import cn.ares.bean.copy.helper.resolve.BeanCopyResolve;
 import cn.ares.bean.copy.helper.resolve.impl.ApacheBeanCopyResolveImpl;
@@ -23,6 +24,7 @@ import cn.ares.bean.copy.helper.resolve.impl.SpringBeanCopyResolveImpl;
 import cn.ares.bean.copy.helper.settings.BeanCopyHelperPluginSettings;
 import cn.ares.bean.copy.helper.util.CommonUtil;
 import cn.ares.bean.copy.helper.util.LocaleSupport;
+import cn.ares.bean.copy.helper.util.PsiConstantUtil;
 import com.intellij.codeInsight.intention.preview.IntentionPreviewInfo.Html;
 import com.intellij.find.FindManager;
 import com.intellij.find.findUsages.FindUsagesHandler;
@@ -66,14 +68,13 @@ import com.intellij.psi.PsiExpression;
 import com.intellij.psi.PsiField;
 import com.intellij.psi.PsiFile;
 import com.intellij.psi.PsiJavaFile;
-import com.intellij.psi.PsiLiteralExpression;
 import com.intellij.psi.PsiManager;
 import com.intellij.psi.PsiMember;
 import com.intellij.psi.PsiMethod;
 import com.intellij.psi.PsiMethodCallExpression;
 import com.intellij.psi.PsiModifier;
 import com.intellij.psi.PsiModifierList;
-import com.intellij.psi.PsiNewExpression;
+import com.intellij.psi.PsiParameter;
 import com.intellij.psi.PsiReferenceExpression;
 import com.intellij.psi.PsiType;
 import com.intellij.psi.PsiTypes;
@@ -109,6 +110,7 @@ import static cn.ares.bean.copy.helper.resolve.impl.HutoolBeanCopyResolveImpl.HU
 import static cn.ares.bean.copy.helper.resolve.impl.SpringBeanCopierResolveImpl.SPRING_BEAN_COPIER_CLASS_NAME;
 import static com.intellij.psi.CommonClassNames.JAVA_LANG_BOOLEAN;
 import static com.intellij.psi.CommonClassNames.JAVA_LANG_OBJECT;
+import static com.intellij.psi.CommonClassNames.JAVA_LANG_STRING;
 
 
 /**
@@ -126,6 +128,8 @@ public class BeanCopyHelper extends AnAction implements StartupActivity.DumbAwar
 
   public static final Html METHOD_NOT_SUPPORTED_HTML = new Html(LocaleSupport.formatMessage("method.not.supported"));
 
+  private static final String IGNORE_PROPERTIES_UNRESOLVED = LocaleSupport.formatMessage("ignore.properties.unresolved");
+
   private static final List<BeanCopyResolve> RESOLVE_STRATEGIE_LIST = List.of(
       new ApacheBeanCopyResolveImpl(),
       new SpringBeanCopyResolveImpl(),
@@ -138,6 +142,10 @@ public class BeanCopyHelper extends AnAction implements StartupActivity.DumbAwar
   private static final Set<String> DEFAULT_IGNORE_PROPERTIES = new HashSet<>();
 
   private static final int IGNORE_PROPERTY_RESOLVE_MAX_DEPTH = 5;
+  /**
+   * 前两个参数是源和目标，忽略属性从第三个参数开始
+   */
+  private static final int DEFAULT_IGNORE_PROPERTIES_START_INDEX = 2;
 
   static {
     BEAN_COPY_METHOD_SET.add("copyProperties");
@@ -262,52 +270,125 @@ public class BeanCopyHelper extends AnAction implements StartupActivity.DumbAwar
   }
 
 
-  public static Set<String> getIgnoreProperties(PsiExpression[] expressions) {
-    if (expressions.length <= 2) {
-      return Set.of();
+  public static IgnoreProperties getIgnoreProperties(PsiMethodCallExpression methodCallExpression, PsiClass sourceClass, PsiClass targetClass) {
+    PsiExpression[] expressions = methodCallExpression.getArgumentList().getExpressions();
+    int startIndex = resolveIgnorePropertiesStartIndex(methodCallExpression);
+    if (startIndex < 0 || expressions.length <= startIndex) {
+      return IgnoreProperties.RESOLVED_EMPTY;
     }
-    Set<String> ignoreProperties = new HashSet<>();
-    // 前两个参数是源和目标，忽略属性从第三个参数开始
-    for (int i = 2; i < expressions.length; i++) {
-      collectIgnoreProperty(expressions[i], ignoreProperties, 0);
+    Set<String> ignorePropertyNameSet = new HashSet<>();
+    boolean resolved = true;
+    for (int i = startIndex; i < expressions.length; i++) {
+      resolved &= collectIgnoreProperty(expressions[i], ignorePropertyNameSet, sourceClass, targetClass, 0);
     }
-    return ignoreProperties;
+    return new IgnoreProperties(ignorePropertyNameSet, resolved);
   }
 
   /**
-   * 忽略属性常量化是常见写法，解析出常量的实际值，否则被忽略的属性会被误判为已复制
+   * 忽略属性的起始下标按形参类型定位，否则Hutool的ignoreCase、BeanCopier的useConverter这类
+   * 同位置的非String参数会被当成忽略属性；返回-1表示该重载没有忽略属性参数
+   * 方法解析不出来时回落到通用形态，即前两个参数是源和目标，忽略属性从第三个参数开始
+   */
+  private static int resolveIgnorePropertiesStartIndex(PsiMethodCallExpression methodCallExpression) {
+    PsiMethod method = methodCallExpression.resolveMethod();
+    if (null == method) {
+      return DEFAULT_IGNORE_PROPERTIES_START_INDEX;
+    }
+    PsiParameter[] parameters = method.getParameterList().getParameters();
+    for (int i = DEFAULT_IGNORE_PROPERTIES_START_INDEX; i < parameters.length; i++) {
+      // String、String[]和String...的元素类型都是String
+      if (JAVA_LANG_STRING.equals(parameters[i].getType().getDeepComponentType().getCanonicalText())) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  /**
+   * 解析单个忽略属性参数的实际值，返回false表示无法静态求出，供Hutool的CopyOptions链式配置复用
+   */
+  public static boolean collectIgnoreProperty(PsiExpression expression, Set<String> ignorePropertyNameSet,
+      PsiClass sourceClass, PsiClass targetClass) {
+    return collectIgnoreProperty(expression, ignorePropertyNameSet, sourceClass, targetClass, 0);
+  }
+
+  /**
+   * 忽略属性常量化是常见写法，先用平台的常量求值覆盖字面量、常量引用、拼接、括号、三元和强转，
+   * 求不出来再按数组初始化器、lombok常量、变量初始值逐级还原，返回false表示实际值无法静态求出
    * depth用于防止常量之间循环引用导致无限递归
    */
-  private static void collectIgnoreProperty(PsiExpression expression, Set<String> ignoreProperties, int depth) {
+  private static boolean collectIgnoreProperty(PsiExpression expression, Set<String> ignorePropertyNameSet,
+      PsiClass sourceClass, PsiClass targetClass, int depth) {
     if (null == expression || depth > IGNORE_PROPERTY_RESOLVE_MAX_DEPTH) {
-      return;
+      return false;
     }
-    if (expression instanceof PsiLiteralExpression literalExpression) {
-      // 只取字符串字面量，Hutool的ignoreCase等布尔参数也在这个位置
-      if (literalExpression.getValue() instanceof String propertyName) {
-        ignoreProperties.add(propertyName);
+    Object constantValue = PsiConstantUtil.evaluate(expression);
+    if (constantValue instanceof String propertyName) {
+      ignorePropertyNameSet.add(propertyName);
+      return true;
+    }
+    if (null != constantValue) {
+      // 求出了非字符串常量，这个位置不是忽略属性，不算解析失败
+      return true;
+    }
+    PsiArrayInitializerExpression arrayInitializer = PsiConstantUtil.findArrayInitializer(expression);
+    if (null != arrayInitializer) {
+      boolean resolved = true;
+      for (PsiExpression element : arrayInitializer.getInitializers()) {
+        resolved &= collectIgnoreProperty(element, ignorePropertyNameSet, sourceClass, targetClass, depth + 1);
       }
-      return;
+      return resolved;
     }
     if (expression instanceof PsiReferenceExpression referenceExpression) {
-      if (referenceExpression.resolve() instanceof PsiVariable variable) {
-        collectIgnoreProperty(variable.getInitializer(), ignoreProperties, depth + 1);
+      return collectIgnorePropertyByReference(referenceExpression, ignorePropertyNameSet, sourceClass, targetClass, depth);
+    }
+    // 方法调用等运行时才能确定的值无法静态求出
+    return false;
+  }
+
+  /**
+   * 引用求值失败的三种情形：lombok生成的常量没有初始值、数组常量链要继续展开、变量不是编译期常量
+   */
+  private static boolean collectIgnorePropertyByReference(PsiReferenceExpression referenceExpression,
+      Set<String> ignorePropertyNameSet, PsiClass sourceClass, PsiClass targetClass, int depth) {
+    if (referenceExpression.resolve() instanceof PsiVariable variable) {
+      if (variable instanceof PsiField field) {
+        String propertyName = PsiConstantUtil.evaluateFieldNameConstant(field);
+        if (null != propertyName) {
+          ignorePropertyNameSet.add(propertyName);
+          return true;
+        }
       }
-      return;
-    }
-    PsiArrayInitializerExpression arrayInitializer;
-    if (expression instanceof PsiArrayInitializerExpression initializerExpression) {
-      arrayInitializer = initializerExpression;
-    } else if (expression instanceof PsiNewExpression newExpression) {
-      arrayInitializer = newExpression.getArrayInitializer();
-    } else {
-      return;
-    }
-    if (null != arrayInitializer) {
-      for (PsiExpression element : arrayInitializer.getInitializers()) {
-        collectIgnoreProperty(element, ignoreProperties, depth + 1);
+      PsiExpression initializer = variable.getInitializer();
+      // 初始值也求不出来时继续走名字兜底，不能直接判为失败
+      if (null != initializer
+          && collectIgnoreProperty(initializer, ignorePropertyNameSet, sourceClass, targetClass, depth + 1)) {
+        return true;
       }
     }
+    return collectIgnorePropertyByName(referenceExpression, ignorePropertyNameSet, sourceClass, targetClass);
+  }
+
+  /**
+   * 求值和结构还原都失败时的兜底，仅当常量名恰是源类或目标类的属性名才采纳
+   * 能求值的一律走不到这里，触发面很窄，用于兜住lombok插件未启用导致Fields内部类不存在、
+   * 常量名被lombok.config改过等情形，同时避免把无关常量的名字当成属性名
+   */
+  private static boolean collectIgnorePropertyByName(PsiReferenceExpression referenceExpression,
+      Set<String> ignorePropertyNameSet, PsiClass sourceClass, PsiClass targetClass) {
+    String referenceName = referenceExpression.getReferenceName();
+    if (null == referenceName) {
+      return false;
+    }
+    if (!hasField(sourceClass, referenceName) && !hasField(targetClass, referenceName)) {
+      return false;
+    }
+    ignorePropertyNameSet.add(referenceName);
+    return true;
+  }
+
+  private static boolean hasField(PsiClass psiClass, String fieldName) {
+    return null != psiClass && null != psiClass.findFieldByName(fieldName, true);
   }
 
   @Override
@@ -358,6 +439,10 @@ public class BeanCopyHelper extends AnAction implements StartupActivity.DumbAwar
                 if (isBeanCopyMethod(canonicalText)) {
                   Result result = invoke(methodCallExpression);
                   if (null == result) {
+                    return;
+                  }
+                  // 忽略属性没有解析完整时被忽略的属性会被当成已复制，宁可不建索引也不建指向错误位置的索引
+                  if (!result.ignorePropertiesResolved()) {
                     return;
                   }
 
@@ -449,6 +534,10 @@ public class BeanCopyHelper extends AnAction implements StartupActivity.DumbAwar
       if (null == result) {
         return false;
       }
+      // 与建索引同一判据，忽略属性没有解析完整时不能断言该属性会被复制
+      if (!result.ignorePropertiesResolved()) {
+        return false;
+      }
       PsiClass sourceClass = result.sourceClass();
       PsiClass targetClass = result.targetClass();
       if (null == sourceClass || null == targetClass) {
@@ -513,6 +602,23 @@ public class BeanCopyHelper extends AnAction implements StartupActivity.DumbAwar
       return Set.of("get" + suffix, "is" + suffix);
     }
     return Set.of("get" + suffix);
+  }
+
+  /**
+   * 由Getter方法名反查属性名，供Hutool的CopyOptions#setIgnoreProperties(Func1...)方法引用形式使用，
+   * 仍由属性名正向拼出方法名再比对，避免直接裁剪方法名前缀在getURL这类命名上失配
+   */
+  public static String resolvePropertyNameByGetter(String getterName, PsiClass psiClass) {
+    if (null == getterName || null == psiClass) {
+      return null;
+    }
+    for (PsiField field : psiClass.getAllFields()) {
+      String propertyName = field.getName();
+      if (accessorNameSet(propertyName, field.getType(), false).contains(getterName)) {
+        return propertyName;
+      }
+    }
+    return null;
   }
 
   private static boolean isBooleanType(PsiType propertyType) {
@@ -708,6 +814,16 @@ public class BeanCopyHelper extends AnAction implements StartupActivity.DumbAwar
     }
   }
 
+  /**
+   * 忽略属性没有解析完整时在展示上给出提示，否则据此生成的Setter代码可能把实际已被忽略的属性也复制过去
+   */
+  public static String buildIgnorePropertiesUnresolvedHtml(Result result) {
+    if (result.ignorePropertiesResolved()) {
+      return "";
+    }
+    return "<p style=\"font-size: 10px;\">⚠️ " + IGNORE_PROPERTIES_UNRESOLVED + "</p>";
+  }
+
   public static double getFontSize(int maxLength) {
     // 计算字体大小保留1位小数
     String foneSizePercentage = BeanCopyHelperPluginSettings.getInstance().getFoneSizePercentage();
@@ -718,12 +834,17 @@ public class BeanCopyHelper extends AnAction implements StartupActivity.DumbAwar
     return fontSize;
   }
 
+  /**
+   * ignorePropertiesResolved为false表示有忽略属性的值无法静态求出，ignoredProperties不完整，
+   * 此时不能断言某个属性一定会被复制，据此抑制会误报的类型告警与引用索引写入
+   */
   public record Result(PsiClass sourceClass, PsiClass targetClass,
                        Map<String, Property> sourcePropertyMap,
                        Map<String, Property> targetPropertyMap,
                        Map<String, Property> lowerCaseSourcePropertyMap,
                        Map<String, Property> lowerCaseTargetPropertyMap,
                        Set<String> ignoredProperties,
+                       boolean ignorePropertiesResolved,
                        boolean sourceCollection) {
 
   }
